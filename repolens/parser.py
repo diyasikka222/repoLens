@@ -31,12 +31,17 @@ class Import:
 
 @dataclass(frozen=True)
 class FromImport:
-    """A ``from module import name`` or ``from module import name as alias`` statement."""
+    """A ``from module import name`` or ``from module import name as alias`` statement.
+
+    ``level`` is the number of parent packages in a relative import (PEP 328);
+    ``0`` marks an absolute import.
+    """
 
     module: str
     name: str
     alias: str | None = None
     line: int | None = None
+    level: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,13 +119,13 @@ class PythonParser:
     def _extract_from_imports(self, tree: ast.Module) -> list[FromImport]:
         return [
             FromImport(
-                module=node.module,
+                module=node.module or "",
                 name=alias.name,
                 alias=alias.asname,
                 line=node.lineno,
+                level=node.level,
             )
             for node in self._nodes_of_type(tree, ast.ImportFrom)
-            if node.module is not None
             for alias in node.names
         ]
 

@@ -171,6 +171,18 @@ def test_extracts_from_import_statements(tmp_path: Path) -> None:
     }
 
 
+def test_relative_imports_preserve_level() -> None:
+    source = "from . import helpers\nfrom ..core.base import Base\n"
+
+    analysis = PythonParser().parse_source(source)
+
+    extracted = {
+        (item.module, item.name, item.level)
+        for item in analysis.from_imports
+    }
+    assert extracted == {("", "helpers", 1), ("core.base", "Base", 2)}
+
+
 def test_handles_multiple_classes_and_functions(tmp_path: Path) -> None:
     source = "\n".join([CLASS_WITH_METHODS_AND_BASES, FUNCTION_WITH_ARGUMENTS])
     file_path = write_source(tmp_path, "mixed.py", source)
