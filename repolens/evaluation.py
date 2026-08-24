@@ -28,10 +28,12 @@ ground-truth set:
   the first relevant file in ``retrieved``; ``0.0`` when no relevant file
   was retrieved.
 
-All metrics lie in ``[0.0, 1.0]``. The runner reuses
-``CodeSearcher.search(query, limit=k)`` verbatim and duplicates no ranking
-logic; determinism follows from the deterministic ranking and fixed
-iteration order over the supplied cases.
+All metrics lie in ``[0.0, 1.0]``. The runner drives any object satisfying
+the :class:`Searcher` protocol (``search(query, limit=...)`` returning
+ranked results with a ``file_path`` attribute); it defaults to the lexical
+:class:`~repolens.search.CodeSearcher`, whose baseline behavior is
+unchanged, and can equally evaluate a :class:`~repolens.semantic_search.SemanticSearcher`
+without duplicating any evaluation logic.
 """
 
 from __future__ import annotations
@@ -39,10 +41,20 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 from repolens.search import CodeSearcher
 
 DEFAULT_K = 5
+
+
+@runtime_checkable
+class Searcher(Protocol):
+    """Anything the evaluator can query for ranked repository files."""
+
+    def search(self, query: str, limit: int) -> Sequence[Any]:
+        """Return ranked results (objects exposing ``file_path``)."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -162,18 +174,26 @@ class EvaluationReport:
 
 
 class EvaluationRunner:
-    """Runs evaluation cases against a repository using :class:`CodeSearcher`.
+    """Runs evaluation cases against a repository.
 
-    Example::
+    The default searcher is the lexical :class:`CodeSearcher`; pass any
+    other :class:`Searcher` (for example a ``SemanticSearcher`` built on the
+    same root) via ``searcher`` to measure it with identical code::
 
         runner = EvaluationRunner(repo_root)
+        runner = EvaluationRunner(
+            repo_root, searcher=SemanticSearcher(repo_root, provider)
+        )
+
         report = runner.evaluate(cases, k=5)
         report.mean_reciprocal_rank
     """
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, searcher: Searcher | None = None) -> None:
         self.root = Path(root)
-        self._searcher = CodeSearcher(self.root)
+        self._searcher: Searcher = (
+            searcher if searcher is not None else CodeSearcher(self.root)
+        )
 
     def evaluate(
         self, cases: Iterable[EvaluationCase], k: int = DEFAULT_K
