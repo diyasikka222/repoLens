@@ -1,0 +1,56 @@
+{
+  "description": "Synthetic evaluation dataset for RepoLens lexical search. The tests copy tests/fixtures/synthetic_repository into a tmp_path repository and run each query against it. Relevant files are the ground truth for their query.",
+  "default_k": 5,
+  "cases": [
+    {
+      "name": "user-authentication",
+      "query": "user authentication",
+      "relevant_files": ["auth/login.py"]
+    },
+    {
+      "name": "password-hashing",
+      "query": "hash password",
+      "relevant_files": ["auth/passwords.py"]
+    },
+    {
+      "name": "database-connection-pool",
+      "query": "database connection pool",
+      "relevant_files": ["database/connection.py", "database/pool.py"]
+    },
+    {
+      "name": "invoice-calculation",
+      "query": "invoice calculation",
+      "relevant_files": ["billing/invoice.py", "billing/tax.py"]
+    },
+    {
+      "name": "payment-processing",
+      "query": "payment processing",
+      "relevant_files": ["payments/processor.py", "payments/refund.py"]
+    },
+    {
+      "name": "user-creation",
+      "query": "create user account",
+      "relevant_files": ["users/create.py"]
+    },
+    {
+      "name": "configuration-settings",
+      "query": "application configuration settings",
+      "relevant_files": ["config/settings.py"]
+    },
+    {
+      "name": "structured-logging",
+      "query": "structured logging",
+      "relevant_files": ["logging/logger.py"]
+    },
+    {
+      "name": "api-routes",
+      "query": "api routes",
+      "relevant_files": ["api/routes.py"]
+    },
+    {
+      "name": "card-refund",
+      "query": "refund card payment",
+      "relevant_files": ["payments/refund.py"]
+    }
+  ]
+}
