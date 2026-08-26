@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Evaluate RepoLens retrieval with local FastEmbed embeddings.
 
-Compares three retrieval strategies against the synthetic evaluation dataset:
+Compares four retrieval strategies against the synthetic evaluation dataset:
 
-1. Lexical baseline   (CodeSearcher)
-2. Local semantic     (SemanticSearcher + FastEmbed BAAI/bge-small-en-v1.5)
-3. Local hybrid       (HybridSearcher combining lexical + local semantic)
+1. Lexical baseline    (CodeSearcher)
+2. Local semantic      (SemanticSearcher + FastEmbed BAAI/bge-small-en-v1.5)
+3. Weighted hybrid     (HybridSearcher, strategy="weighted")
+4. RRF hybrid          (HybridSearcher, strategy="rrf")
+
+Also runs a weight sweep across weighted-hybrid configurations.
 
 Usage
 -----
@@ -13,9 +16,6 @@ No environment variables are required.  The first run downloads the
 BAAI/bge-small-en-v1.5 model (~130 MB); subsequent runs are fully offline.
 
     python benchmarks/evaluate_local_embeddings.py
-
-This script is intentionally NOT collected by pytest.  It makes real
-computation calls and downloads the embedding model on first run.
 """
 
 from __future__ import annotations
@@ -26,26 +26,16 @@ import sys
 import time
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Resolve project root (one level up from benchmarks/)
-# ---------------------------------------------------------------------------
-
 _HERE = Path(__file__).resolve().parent
 _PROJECT_ROOT = _HERE.parent
 _FIXTURES_DIR = _PROJECT_ROOT / "tests" / "fixtures"
 _CASES_JSON = _FIXTURES_DIR / "evaluation_cases.json"
 _SYNTHETIC_REPO = _FIXTURES_DIR / "synthetic_repository"
 
-# Add project root to sys.path so repolens is importable
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 
-# ---------------------------------------------------------------------------
-# Validate paths
-# ---------------------------------------------------------------------------
-
 def _validate_paths() -> None:
-    """Ensure the synthetic repo and evaluation cases exist."""
     if not _SYNTHETIC_REPO.is_dir():
         print(f"ERROR: Synthetic repository not found at {_SYNTHETIC_REPO}", file=sys.stderr)
         sys.exit(1)
@@ -54,13 +44,8 @@ def _validate_paths() -> None:
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Load evaluation cases
-# ---------------------------------------------------------------------------
-
 def _load_cases() -> list:
     from repolens.evaluation import EvaluationCase
-
     payload = json.loads(_CASES_JSON.read_text(encoding="utf-8"))
     return [
         EvaluationCase(query=item["query"], relevant_files=item["relevant_files"])
@@ -68,36 +53,7 @@ def _load_cases() -> list:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Build searchers
-# ---------------------------------------------------------------------------
-
-def _build_lexical(root: Path):
-    from repolens.search import CodeSearcher
-    return CodeSearcher(root)
-
-
-def _build_semantic(root: Path, provider) -> tuple:
-    from repolens.semantic_search import SemanticSearcher
-    return SemanticSearcher(root, provider)
-
-
-def _build_hybrid(root: Path, lexical_searcher, semantic_searcher, lex_weight: float, sem_weight: float):
-    from repolens.retrieval import HybridSearcher
-    return HybridSearcher(
-        root,
-        lexical_searcher=lexical_searcher,
-        semantic_searcher=semantic_searcher,
-        lexical_weight=lex_weight,
-        semantic_weight=sem_weight,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-
-def _format_report_table(report, label: str) -> dict:
+def _format_report(report, label: str) -> dict:
     return {
         "label": label,
         "precision@5": report.mean_precision_at_k,
@@ -108,30 +64,22 @@ def _format_report_table(report, label: str) -> dict:
     }
 
 
-def _print_comparison(results: list[dict], config_info: dict) -> None:
-    width = 78
+def _print_table(results: list[dict], title: str) -> None:
+    width = 90
     sep = "=" * width
     thin = "-" * width
 
     print()
     print(sep)
-    print("  RepoLens Local Embedding Evaluation")
+    print(f"  {title}")
     print(sep)
     print()
 
-    print("  Configuration")
-    print(thin)
-    print(f"  {'Embedding model:':<30} {config_info['model']}")
-    print(f"  {'Embedding dimensions:':<30} {config_info['dimensions']}")
-    print(f"  {'Hybrid lexical weight:':<30} {config_info['lex_weight']}")
-    print(f"  {'Hybrid semantic weight:':<30} {config_info['sem_weight']}")
-    print(f"  {'Evaluation queries:':<30} {config_info['num_queries']}")
-    print(f"  {'k (cutoff):':<30} {config_info['k']}")
-    print()
-
-    header = f"  {'Metric':<20} {'LEXICAL BASELINE':>18} {'LOCAL SEMANTIC':>18} {'LOCAL HYBRID':>18}"
+    labels = [r["label"] for r in results]
+    col_w = max(18, max(len(l) for l in labels) + 2)
+    header = f"  {'Metric':<20}" + "".join(f"{l:>{col_w}}" for l in labels)
     print(header)
-    print(f"  {'-' * 20} {'-' * 18} {'-' * 18} {'-' * 18}")
+    print(f"  {'-' * 20}" + "".join(f"{'-' * col_w}" for _ in labels))
 
     for metric_key, metric_label in [
         ("precision@5", "Precision@5"),
@@ -139,166 +87,210 @@ def _print_comparison(results: list[dict], config_info: dict) -> None:
         ("mrr", "MRR"),
     ]:
         vals = [r[metric_key] for r in results]
-        print(f"  {metric_label:<20} {vals[0]:>18.4f} {vals[1]:>18.4f} {vals[2]:>18.4f}")
+        row = f"  {metric_label:<20}" + "".join(f"{v:>{col_w}.4f}" for v in vals)
+        print(row)
 
     print()
 
-    for r in results:
-        print(f"  {r['label']}")
-        print(f"    Queries evaluated: {r['num_cases']}  |  k = {r['k']}")
-        print()
+
+def _print_weight_sweep(sweep_results: list[dict]) -> None:
+    width = 90
+    sep = "=" * width
+    thin = "-" * width
+
+    print()
+    print(sep)
+    print("  Weight Sweep (Weighted Hybrid)")
+    print(sep)
+    print()
+    print(f"  {'Lex Wt':>8} {'Sem Wt':>8} {'Precision@5':>13} {'Recall@5':>10} {'MRR':>10}")
+    print(f"  {'-' * 8} {'-' * 8} {'-' * 13} {'-' * 10} {'-' * 10}")
+
+    for r in sweep_results:
+        print(
+            f"  {r['lex_weight']:>8.1f} {r['sem_weight']:>8.1f}"
+            f" {r['precision@5']:>13.4f} {r['recall@5']:>10.4f} {r['mrr']:>10.4f}"
+        )
+
+    print()
 
 
-# ---------------------------------------------------------------------------
-# Per-query detail
-# ---------------------------------------------------------------------------
-
-def _print_per_query_detail(
-    lexical_evals, semantic_evals, hybrid_evals, cases
-) -> None:
-    width = 78
+def _print_per_query_detail(all_evals: dict[str, list], cases: list) -> None:
+    width = 110
     print("-" * width)
     print("  Per-Query Breakdown")
     print("-" * width)
     print()
-    print(f"  {'Query':<30} {'Lex P@5':>8} {'Sem P@5':>8} {'Hyb P@5':>8}  {'Lex RR':>7} {'Sem RR':>7} {'Hyb RR':>7}")
-    print(f"  {'-' * 30} {'-' * 8} {'-' * 8} {'-' * 8}  {'-' * 7} {'-' * 7} {'-' * 7}")
+
+    labels = list(all_evals.keys())
+    short_labels = {"LEXICAL BASELINE": "Lex", "LOCAL SEMANTIC": "Sem", "WEIGHTED HYBRID": "WHyb", "RRF HYBRID": "RHyb"}
+
+    header = f"  {'Query':<30}"
+    for label in labels:
+        short = short_labels.get(label, label[:4])
+        header += f" {short + ' P@5':>9} {short + ' RR':>8}"
+    print(header)
+    print(f"  {'-' * 30}" + "".join(f" {'-' * 9} {'-' * 8}" for _ in labels))
 
     for i, case in enumerate(cases):
         q = case.query if len(case.query) <= 28 else case.query[:25] + "..."
-        lex = lexical_evals[i]
-        sem = semantic_evals[i]
-        hyb = hybrid_evals[i]
-        print(
-            f"  {q:<30}"
-            f" {lex.precision_at_k:>8.4f}"
-            f" {sem.precision_at_k:>8.4f}"
-            f" {hyb.precision_at_k:>8.4f}"
-            f"  {lex.reciprocal_rank:>7.4f}"
-            f" {sem.reciprocal_rank:>7.4f}"
-            f" {hyb.reciprocal_rank:>7.4f}"
-        )
+        row = f"  {q:<30}"
+        for label in labels:
+            ev = all_evals[label][i]
+            row += f" {ev.precision_at_k:>9.4f} {ev.reciprocal_rank:>8.4f}"
+        print(row)
     print()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    # 1. Validate paths
     _validate_paths()
-
-    # 2. Load evaluation cases
     cases = _load_cases()
     k = 5
-    lex_weight = 0.5
-    sem_weight = 0.5
+    root = _SYNTHETIC_REPO
 
-    # 3. Build the local embedding provider
     from repolens.local_embeddings import LocalEmbeddingProvider
+    from repolens.search import CodeSearcher
+    from repolens.semantic_search import SemanticSearcher
+    from repolens.retrieval import HybridSearcher, FusionStrategy
+    from repolens.evaluation import EvaluationRunner
 
     model_name = os.environ.get("REPOLENS_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5").strip() or "BAAI/bge-small-en-v1.5"
     provider = LocalEmbeddingProvider(model=model_name)
 
-    root = _SYNTHETIC_REPO
-
-    # 4. Build searchers
-    print(f"Building lexical searcher...")
+    # Build base searchers
+    print("Building lexical searcher...")
     t0 = time.perf_counter()
-    lexical = _build_lexical(root)
-    t_lex = time.perf_counter() - t0
-    print(f"  Done in {t_lex:.2f}s")
+    lexical = CodeSearcher(root)
+    print(f"  Done in {time.perf_counter() - t0:.2f}s")
 
     print(f"Building local semantic searcher (model: {model_name})...")
-    print("  (First run may download the model — this is expected.)")
+    print("  (First run may download the model.)")
     t0 = time.perf_counter()
-    semantic = _build_semantic(root, provider)
-    t_sem = time.perf_counter() - t0
-    print(f"  Done in {t_sem:.2f}s")
+    semantic = SemanticSearcher(root, provider)
+    print(f"  Done in {time.perf_counter() - t0:.2f}s")
 
-    print("Building local hybrid searcher...")
-    t0 = time.perf_counter()
-    hybrid = _build_hybrid(root, lexical, semantic, lex_weight, sem_weight)
-    t_hyb = time.perf_counter() - t0
-    print(f"  Done in {t_hyb:.2f}s")
-
-    # 5. Evaluate each strategy
-    from repolens.evaluation import EvaluationRunner
+    # --- 4-way comparison ---
 
     print()
-    print("Evaluating lexical baseline...")
-    lex_runner = EvaluationRunner(root, searcher=lexical)
-    lex_report = lex_runner.evaluate(cases, k=k)
+    print("Evaluating strategies...")
 
-    print("Evaluating local semantic...")
-    sem_runner = EvaluationRunner(root, searcher=semantic)
-    sem_report = sem_runner.evaluate(cases, k=k)
+    # Lexical
+    lex_report = EvaluationRunner(root, searcher=lexical).evaluate(cases, k=k)
 
-    print("Evaluating local hybrid...")
-    hyb_runner = EvaluationRunner(root, searcher=hybrid)
-    hyb_report = hyb_runner.evaluate(cases, k=k)
+    # Semantic
+    sem_report = EvaluationRunner(root, searcher=semantic).evaluate(cases, k=k)
 
-    # 6. Format results
-    lex_metrics = _format_report_table(lex_report, "LEXICAL BASELINE")
-    sem_metrics = _format_report_table(sem_report, "LOCAL SEMANTIC")
-    hyb_metrics = _format_report_table(hyb_report, "LOCAL HYBRID")
+    # Weighted hybrid (default 0.5/0.5)
+    weighted_hybrid = HybridSearcher(
+        root, lexical_searcher=lexical, semantic_searcher=semantic,
+        lexical_weight=0.5, semantic_weight=0.5, strategy=FusionStrategy.WEIGHTED,
+    )
+    wh_report = EvaluationRunner(root, searcher=weighted_hybrid).evaluate(cases, k=k)
+
+    # RRF hybrid
+    rrf_hybrid = HybridSearcher(
+        root, lexical_searcher=lexical, semantic_searcher=semantic,
+        strategy=FusionStrategy.RRF,
+    )
+    rrf_report = EvaluationRunner(root, searcher=rrf_hybrid).evaluate(cases, k=k)
+
+    all_results = [
+        _format_report(lex_report, "LEXICAL BASELINE"),
+        _format_report(sem_report, "LOCAL SEMANTIC"),
+        _format_report(wh_report, "WEIGHTED HYBRID"),
+        _format_report(rrf_report, "RRF HYBRID"),
+    ]
 
     config_info = {
         "model": model_name,
         "dimensions": provider.dimensions,
-        "lex_weight": lex_weight,
-        "sem_weight": sem_weight,
-        "num_queries": len(cases),
         "k": k,
+        "num_queries": len(cases),
     }
 
-    # 7. Print comparison
-    _print_comparison([lex_metrics, sem_metrics, hyb_metrics], config_info)
+    # Print main comparison
+    print()
+    print("=" * 90)
+    print("  RepoLens Local Embedding Evaluation")
+    print("=" * 90)
+    print()
+    print("  Configuration")
+    print("-" * 90)
+    print(f"  {'Embedding model:':<30} {config_info['model']}")
+    print(f"  {'Embedding dimensions:':<30} {config_info['dimensions']}")
+    print(f"  {'Evaluation queries:':<30} {config_info['num_queries']}")
+    print(f"  {'k (cutoff):':<30} {config_info['k']}")
+    print(f"  {'Default hybrid weights:':<30} lexical=0.5, semantic=0.5")
+    print(f"  {'RRF k constant:':<30} 60")
 
-    # 8. Per-query detail
-    _print_per_query_detail(
-        lex_report.case_evaluations,
-        sem_report.case_evaluations,
-        hyb_report.case_evaluations,
-        cases,
-    )
+    _print_table(all_results, "Strategy Comparison")
 
-    # 9. Summary / verdict
-    print("=" * 78)
+    # Per-query detail
+    all_evals = {
+        "LEXICAL BASELINE": lex_report.case_evaluations,
+        "LOCAL SEMANTIC": sem_report.case_evaluations,
+        "WEIGHTED HYBRID": wh_report.case_evaluations,
+        "RRF HYBRID": rrf_report.case_evaluations,
+    }
+    _print_per_query_detail(all_evals, cases)
+
+    # --- Weight sweep ---
+
+    print("Running weight sweep...")
+    sweep_configs = [
+        (0.9, 0.1), (0.8, 0.2), (0.7, 0.3), (0.6, 0.4), (0.5, 0.5),
+        (0.4, 0.6), (0.3, 0.7), (0.2, 0.8), (0.1, 0.9),
+    ]
+    sweep_results = []
+    for lw, sw in sweep_configs:
+        h = HybridSearcher(
+            root, lexical_searcher=lexical, semantic_searcher=semantic,
+            lexical_weight=lw, semantic_weight=sw, strategy=FusionStrategy.WEIGHTED,
+        )
+        report = EvaluationRunner(root, searcher=h).evaluate(cases, k=k)
+        sweep_results.append({
+            "lex_weight": lw,
+            "sem_weight": sw,
+            "precision@5": report.mean_precision_at_k,
+            "recall@5": report.mean_recall_at_k,
+            "mrr": report.mean_reciprocal_rank,
+        })
+
+    _print_weight_sweep(sweep_results)
+
+    # --- Summary ---
+
+    print("=" * 90)
     print("  Summary")
-    print("=" * 78)
+    print("=" * 90)
     print()
 
-    p5_lex = lex_metrics["precision@5"]
-    p5_sem = sem_metrics["precision@5"]
-    p5_hyb = hyb_metrics["precision@5"]
+    p5 = {r["label"]: r["precision@5"] for r in all_results}
+    r5 = {r["label"]: r["recall@5"] for r in all_results}
+    mrr = {r["label"]: r["mrr"] for r in all_results}
 
-    r5_lex = lex_metrics["recall@5"]
-    r5_sem = sem_metrics["recall@5"]
-    r5_hyb = hyb_metrics["recall@5"]
-
-    mrr_lex = lex_metrics["mrr"]
-    mrr_sem = sem_metrics["mrr"]
-    mrr_hyb = hyb_metrics["mrr"]
-
-    print(f"  Lexical baseline  — P@5: {p5_lex:.4f}  R@5: {r5_lex:.4f}  MRR: {mrr_lex:.4f}")
-    print(f"  Local semantic    — P@5: {p5_sem:.4f}  R@5: {r5_sem:.4f}  MRR: {mrr_sem:.4f}")
-    print(f"  Local hybrid      — P@5: {p5_hyb:.4f}  R@5: {r5_hyb:.4f}  MRR: {mrr_hyb:.4f}")
-    print()
-
-    strategies = [("Lexical", p5_lex, r5_lex, mrr_lex),
-                  ("Semantic", p5_sem, r5_sem, mrr_sem),
-                  ("Hybrid", p5_hyb, r5_hyb, mrr_hyb)]
-
-    for metric_name, idx in [("Precision@5", 1), ("Recall@5", 2), ("MRR", 3)]:
-        best = max(strategies, key=lambda s: s[idx])
-        print(f"  Best {metric_name}: {best[0]} ({best[idx]:.4f})")
+    for label in ["LEXICAL BASELINE", "LOCAL SEMANTIC", "WEIGHTED HYBRID", "RRF HYBRID"]:
+        print(f"  {label:<22} — P@5: {p5[label]:.4f}  R@5: {r5[label]:.4f}  MRR: {mrr[label]:.4f}")
 
     print()
-    print("=" * 78)
+
+    strategies = list(all_results)
+    for metric_name, key in [("Precision@5", "precision@5"), ("Recall@5", "recall@5"), ("MRR", "mrr")]:
+        best = max(strategies, key=lambda s: s[key])
+        print(f"  Best {metric_name}: {best['label']} ({best[key]:.4f})")
+
+    print()
+
+    # Best weight sweep config
+    best_sweep = max(sweep_results, key=lambda s: s["mrr"])
+    print(f"  Best weight-sweep MRR: lex={best_sweep['lex_weight']:.1f} sem={best_sweep['sem_weight']:.1f} (MRR={best_sweep['mrr']:.4f})")
+    best_p5_sweep = max(sweep_results, key=lambda s: s["precision@5"])
+    print(f"  Best weight-sweep P@5: lex={best_p5_sweep['lex_weight']:.1f} sem={best_p5_sweep['sem_weight']:.1f} (P@5={best_p5_sweep['precision@5']:.4f})")
+
+    print()
+    print("=" * 90)
     print("  Evaluation complete.")
-    print("=" * 78)
+    print("=" * 90)
 
 
 if __name__ == "__main__":
