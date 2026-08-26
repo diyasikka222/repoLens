@@ -26,4 +26,82 @@ At a high level, RepoLens will consist of three layers:
    - an **MCP server** so AI coding agents can consume RepoLens as a tool,
    - a **web application** for interactive exploration.
 
-> **Status:** Project scaffold only. Core functionality is not yet implemented.
+> **Status:** Local semantic search and hybrid retrieval are functional. See the sections below for setup and usage.
+
+## Embedding Providers
+
+RepoLens supports multiple embedding providers through a common `EmbeddingProvider` interface:
+
+| Provider | API Key Required | Cost | Offline After Setup | Default Model |
+|---|---|---|---|---|
+| `FakeEmbeddingProvider` | No | Free | Yes | Hash-based (test double) |
+| `LocalEmbeddingProvider` | No | Free | Yes (after first download) | `BAAI/bge-small-en-v1.5` |
+| `OpenAIEmbeddingProvider` | Yes | Paid | No | Any OpenAI-compatible model |
+
+### Local Embeddings (Recommended for Development)
+
+Local embeddings use [FastEmbed](https://github.com/qdrant/fastembed) to run ONNX models entirely on-device. No API key is required.
+
+**Setup:**
+
+```bash
+pip install -e ".[dev]"
+```
+
+**First run downloads the model:**
+
+The default model `BAAI/bge-small-en-v1.5` (~130 MB) is downloaded from Hugging Face on first use. After download, embeddings run locally with no network access.
+
+**Override the model:**
+
+```bash
+export REPOLENS_LOCAL_EMBEDDING_MODEL="BAAI/bge-base-en-v1.5"
+```
+
+**Run the local benchmark:**
+
+```bash
+python benchmarks/evaluate_local_embeddings.py
+```
+
+### OpenAI Embeddings (Optional)
+
+Requires a valid API key and available credits.
+
+```bash
+export REPOLENS_EMBEDDING_API_KEY="sk-..."
+export REPOLENS_EMBEDDING_MODEL="text-embedding-3-small"
+python benchmarks/evaluate_real_embeddings.py
+```
+
+## Running Tests
+
+```bash
+# Run all unit tests (no network, no model download)
+python -m pytest -v
+
+# Run integration tests only (requires model download)
+python -m pytest -m integration -v
+```
+
+## Project Structure
+
+```
+repolens/
+  embeddings.py          # EmbeddingProvider interface + FakeEmbeddingProvider + OpenAIEmbeddingProvider
+  local_embeddings.py    # LocalEmbeddingProvider (FastEmbed)
+  semantic_search.py     # SemanticSearcher (vector similarity ranking)
+  retrieval.py           # HybridSearcher (lexical + semantic)
+  search.py              # CodeSearcher (lexical)
+  scanner.py             # Repository file discovery
+  parser.py              # Python AST parsing
+  index.py               # Symbol index
+  graph.py               # Dependency graph
+  evaluation.py          # Retrieval quality evaluation
+benchmarks/
+  evaluate_local_embeddings.py   # Local embedding evaluation
+  evaluate_real_embeddings.py    # OpenAI embedding evaluation
+tests/
+  test_local_embeddings.py       # LocalEmbeddingProvider unit tests
+  ...
+```

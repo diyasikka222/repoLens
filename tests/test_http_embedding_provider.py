@@ -360,6 +360,24 @@ class TestErrorHandling:
                 provider.embed_text("test")
             assert exc_info.value.status_code == 429
 
+    def test_http_429_includes_response_body_in_message(self) -> None:
+        provider = _make_provider()
+        error_body = '{"error": {"message": "Rate limit exceeded: reduce request rate", "type": "rate_limit_error", "code": "rate_limit_exceeded"}}'
+        http_error = urllib.error.HTTPError(
+            url="https://api.example.com/v1/embeddings",
+            code=429,
+            msg="Too Many Requests",
+            hdrs=None,
+            fp=BytesIO(error_body.encode("utf-8")),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=http_error):
+            with pytest.raises(EmbeddingAPIError, match="Rate limit exceeded") as exc_info:
+                provider.embed_text("test")
+            assert exc_info.value.status_code == 429
+            assert exc_info.value.body == error_body
+            assert str(exc_info.value) == f"HTTP 429 from embedding API: Too Many Requests: {error_body}"
+
     def test_http_500_raises_api_error(self) -> None:
         provider = _make_provider()
         http_error = urllib.error.HTTPError(

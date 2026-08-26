@@ -21,3 +21,7 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# FastEmbed / Hugging Face model cache
+.cache/
+models/

@@ -266,8 +266,11 @@ class OpenAIEmbeddingProvider:
                 error_body = exc.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
+            message = f"HTTP {exc.code} from embedding API: {exc.reason}"
+            if error_body:
+                message += f": {error_body}"
             raise EmbeddingAPIError(
-                f"HTTP {exc.code} from embedding API: {exc.reason}",
+                message,
                 status_code=exc.code,
                 body=error_body,
             ) from exc
