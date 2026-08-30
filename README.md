@@ -151,7 +151,86 @@ precision, recall **and** MRR above both single-strategy baselines.
   per-file document representation; results are not directly comparable to the
   synthetic benchmark, which has different ground truth.
 
+## Dependency-Aware Context Engine
 
+RepoLens goes beyond retrieving relevant files. The **Context Engine**
+(`repolens.context`) determines the smallest useful set of repository context
+an AI coding agent needs to understand a task:
+
+```
+User/Agent Query
+    ↓
+Retrieval
+    ↓
+Candidate Files
+    ↓
+Dependency Expansion
+    ↓
+Context Ranking
+    ↓
+Context Budget
+    ↓
+Final Context Package
+```
+
+It composes the existing retrieval and dependency-graph components; it does
+not re-implement or modify them. No agents or MCP are involved in this
+milestone.
+
+### Usage
+
+```python
+from repolens.context import ContextEngine, ContextBudget, DependencyExpansionConfig
+
+# Retrieval uses the existing RRF hybrid (default weights, RRF k=60).
+engine = ContextEngine(
+    "path/to/repo",
+    budget=ContextBudget(max_tokens=8000),
+    dependency=DependencyExpansionConfig(depth=1),
+)
+
+package = engine.build_context("Where is authentication handled?")
+print(package.to_json())          # serializable package
+print(engine.render(package))     # deterministic text for an agent
+```
+
+### Configuration
+
+- **Retrieval** (`RetrievalConfig`): chooses the existing strategy (`rrf`,
+  `weighted`, `lexical`, `semantic`). Defaults match production (0.5/0.5
+  weights, RRF k=60) and are not changed. A pre-built `Searcher` may be
+  injected instead.
+- **Dependency expansion** (`DependencyExpansionConfig`): `depth` is the number
+  of graph hops (0 = retrieved only, 1 = plus direct dependencies/dependents,
+  2 = one more hop); `include_dependencies` / `include_dependents` toggle
+  forward and reverse edges. Traversal is breadth-first, deterministic, and
+  never revisits a file.
+- **Budget** (`ContextBudget`): a maximum in *estimated* tokens. `None` =
+  unlimited.
+
+### Ranking policy
+
+Deterministic and explainable (no learned ranking, no LLM):
+
+1. Primary (directly retrieved) files rank first: by retrieval rank, then
+   retrieval score, then path.
+2. Dependency-expanded files: by graph distance (closer first), then
+   relationship strength (dependents/callers before dependencies at equal
+   distance), then path.
+
+### Token budget & rendering
+
+Token counts use a documented deterministic approximation —
+`max(1, ceil(len(text) / 4))` — for budgeting only. This **approximates**
+tokens and is explicitly distinct from actual model tokenizer counts. The
+package payload is JSON-serializable and `render_context` emits a stable text
+representation for an agent.
+
+### Scope note
+
+An engine can be built that uses RRF directly, but the design keeps retrieval
+behind the generic `Searcher` protocol, so any existing strategy composes
+cleanly and no retrieval code is duplicated.
 
 ### OpenAI Embeddings (Optional)
 
@@ -187,6 +266,17 @@ repolens/
   index.py               # Symbol index
   graph.py               # Dependency graph
   evaluation.py          # Retrieval quality evaluation
+  context/               # Dependency-aware context engine (Milestone 12)
+    __init__.py          #   public API
+    candidate.py         #   ContextCandidate / ExcludedCandidate / CandidateRole
+    config.py            #   RetrievalConfig / DependencyExpansionConfig / ContextBudget
+    engine.py            #   ContextEngine (build_context)
+    expansion.py         #   dependency expansion over the graph
+    ranking.py           #   deterministic context ranking
+    budget.py            #   token-budget selection
+    package.py           #   ContextPackage + JSON serialization
+    render.py            #   render_context (agent text)
+    tokens.py            #   estimate_tokens (deterministic approximation)
 benchmarks/
   evaluate_local_embeddings.py   # Local embedding evaluation
   evaluate_real_embeddings.py    # OpenAI embedding evaluation
@@ -199,5 +289,6 @@ benchmarks/
 tests/
   test_local_embeddings.py       # LocalEmbeddingProvider unit tests
   test_real_repo_benchmark.py    # Benchmark config/dataset tests (offline)
+  test_context_engine.py         # Context-engine tests (offline)
   ...
 ```
