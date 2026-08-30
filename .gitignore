@@ -25,3 +25,6 @@ htmlcov/
 # FastEmbed / Hugging Face model cache
 .cache/
 models/
+
+# Real-world benchmark data (external repository downloads)
+.benchmark_data/

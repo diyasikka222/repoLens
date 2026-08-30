@@ -64,6 +64,95 @@ export REPOLENS_LOCAL_EMBEDDING_MODEL="BAAI/bge-base-en-v1.5"
 python benchmarks/evaluate_local_embeddings.py
 ```
 
+## Real-World Repository Retrieval Benchmark
+
+In addition to the small synthetic dataset, RepoLens ships a benchmark that
+evaluates retrieval against a **real, pinned open-source repository**: the
+[`Textualize/rich`](https://github.com/Textualize/rich) terminal-rendering
+library. It exercises the four retrieval strategies (lexical, local semantic,
+weighted hybrid, RRF) against ~20 manually curated developer queries, so we
+can see whether semantic/hybrid retrieval actually helps on realistic code.
+
+### Repository
+
+| Field       | Value |
+|---|---|
+| Repository  | `Textualize/rich` |
+| URL         | https://github.com/Textualize/rich |
+| Ref / tag   | `v14.3.4` (release) |
+| Commit      | `ee8378c3bbbd7c75abc2f55c6c19e83b218ae81d` |
+| Python files (scanned) | 213 (whole repo; 100 in the `rich/` package) |
+
+The benchmark is pinned to the release tag (not a moving branch), so results
+are reproducible.
+
+### How to run
+
+```bash
+python -m benchmarks.real_repo
+```
+
+The first run downloads the pinned GitHub tarball into the gitignored
+`.benchmark_data/` directory and downloads the ONNX embedding model
+(`BAAI/bge-small-en-v1.5`); subsequent runs are offline and reuse both.
+
+Optional flags:
+
+```bash
+# Exploratory weight sweep (clearly labelled; does NOT change defaults)
+python -m benchmarks.real_repo --weight-sweep
+
+# Override where the repository is stored
+python -m benchmarks.real_repo --repo-dir /path/to/rich
+```
+
+If a prerequisite is missing (e.g. `fastembed` not installed), the command
+reports it clearly and exits. The benchmark never commits the external
+repository and does not require OpenAI.
+
+### How the queries and ground truth were built
+
+- **Queries** (`benchmarks/real_repo/queries.json`) are realistic developer
+  questions phrased as natural language — for example *"Where is the progress
+  bar rendering implemented?"* or *"How does the console markup tag parser
+  work?"* — rather than exact function-name lookups.
+- **Ground truth** was written by hand, by reading the source of the pinned
+  release to identify the repository-relative files that implement each
+  concern. It was **not** derived from search output.
+
+### Metrics
+
+Each strategy reports `Precision@5`, `Recall@5`, and `MRR`, computed by the
+existing [`repolens/evaluation.py`](repolens/evaluation.py) framework.
+
+### Latest results (Rich v14.3.4)
+
+| Strategy | Precision@5 | Recall@5 | MRR |
+|---|---|---|---|
+| Lexical | 0.1900 | 0.4958 | 0.6350 |
+| Local Semantic | 0.2800 | 0.6333 | 0.6250 |
+| Weighted Hybrid (0.5/0.5) | 0.2900 | 0.7208 | 0.7033 |
+| RRF | 0.3100 | 0.7542 | 0.7958 |
+
+On this realistic repository, lexical search alone has low precision because
+exact token matching surfaces many files across a large codebase. Both
+semantic and hybrid retrieval recover recall, and the RRF hybrid raises
+precision, recall **and** MRR above both single-strategy baselines.
+
+### Limitations
+
+- `dev`/`examples`/test files in the repo are scanned like any production file
+  (they are part of the real repository), which adds noise.
+- Evaluation is file-level only; it does not measure retrieval of specific
+  symbols or regions within a file.
+- Ground truth is a manual, small set (20 queries) authored by one person and
+  is specific to this pinned release.
+- Embedding quality reflects the default local model (`bge-small-en-v1.5`) and
+  per-file document representation; results are not directly comparable to the
+  synthetic benchmark, which has different ground truth.
+
+
+
 ### OpenAI Embeddings (Optional)
 
 Requires a valid API key and available credits.
@@ -101,7 +190,14 @@ repolens/
 benchmarks/
   evaluate_local_embeddings.py   # Local embedding evaluation
   evaluate_real_embeddings.py    # OpenAI embedding evaluation
+  real_repo/                     # Real-world repository retrieval benchmark
+    __main__.py                  #   python -m benchmarks.real_repo
+    config.py                    #   pinned repo metadata / constants
+    dataset.py                   #   loads & validates the curated queries
+    runner.py                    #   download, evaluate, report
+    queries.json                 #   20 manually curated developer queries
 tests/
   test_local_embeddings.py       # LocalEmbeddingProvider unit tests
+  test_real_repo_benchmark.py    # Benchmark config/dataset tests (offline)
   ...
 ```

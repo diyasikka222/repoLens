@@ -1,0 +1,106 @@
+{
+  "description": "Manually curated evaluation dataset for the real-world benchmark on Textualize/rich v14.3.4. Each query is a natural-language developer question; relevant_files are the repository-relative files (relative to the rich repo root) that implement the answer. Ground truth was established by reading the source of the pinned release, not by search results.",
+  "default_k": 5,
+  "cases": [
+    {
+      "name": "terminal-output",
+      "query": "How is console output written to the terminal?",
+      "relevant_files": ["rich/console.py", "rich/segment.py", "rich/screen.py"]
+    },
+    {
+      "name": "ansi-escape-handling",
+      "query": "Where is ANSI escape sequence handling implemented?",
+      "relevant_files": ["rich/ansi.py", "rich/control.py", "rich/segment.py"]
+    },
+    {
+      "name": "color-parsing",
+      "query": "How are colors parsed and converted to ANSI codes?",
+      "relevant_files": ["rich/color.py", "rich/color_triplet.py", "rich/style.py"]
+    },
+    {
+      "name": "syntax-highlighting",
+      "query": "Where is syntax highlighting implemented for code listings?",
+      "relevant_files": ["rich/syntax.py", "rich/highlighter.py"]
+    },
+    {
+      "name": "theme-loading",
+      "query": "How are themes loaded and applied to styles?",
+      "relevant_files": ["rich/theme.py", "rich/themes.py", "rich/default_styles.py"]
+    },
+    {
+      "name": "progress-bars",
+      "query": "Where is the progress bar rendering implemented?",
+      "relevant_files": ["rich/progress.py", "rich/progress_bar.py", "rich/bar.py"]
+    },
+    {
+      "name": "markup-parsing",
+      "query": "How does the console markup tag parser work?",
+      "relevant_files": ["rich/markup.py", "rich/_emoji_replace.py"]
+    },
+    {
+      "name": "table-rendering",
+      "query": "Where is table layout and rendering implemented?",
+      "relevant_files": ["rich/table.py"]
+    },
+    {
+      "name": "python-logging",
+      "query": "Where is the Python logging Handler integration?",
+      "relevant_files": ["rich/logging.py"]
+    },
+    {
+      "name": "terminal-prompts",
+      "query": "How are interactive terminal prompts implemented?",
+      "relevant_files": ["rich/prompt.py"]
+    },
+    {
+      "name": "live-display",
+      "query": "Where is the live auto-refreshing display implemented?",
+      "relevant_files": ["rich/live.py", "rich/live_render.py"]
+    },
+    {
+      "name": "status-spinner",
+      "query": "Where is the status spinner animation implemented?",
+      "relevant_files": ["rich/status.py", "rich/spinner.py", "rich/_spinners.py"]
+    },
+    {
+      "name": "panel-borders",
+      "query": "How are panels and their borders rendered?",
+      "relevant_files": ["rich/panel.py", "rich/box.py"]
+    },
+    {
+      "name": "json-formatting",
+      "query": "Where is JSON pretty-printing implemented?",
+      "relevant_files": ["rich/json.py", "rich/pretty.py"]
+    },
+    {
+      "name": "file-tree",
+      "query": "How is a tree of nodes displayed?",
+      "relevant_files": ["rich/tree.py"]
+    },
+    {
+      "name": "traceback-rendering",
+      "query": "Where is exception traceback rendering implemented?",
+      "relevant_files": ["rich/traceback.py"]
+    },
+    {
+      "name": "text-measurement",
+      "query": "How is text wrapping and cell width measurement handled?",
+      "relevant_files": ["rich/text.py", "rich/cells.py", "rich/measure.py", "rich/_wrap.py"]
+    },
+    {
+      "name": "emoji-replacement",
+      "query": "Where are emojis mapped and replaced in output?",
+      "relevant_files": ["rich/emoji.py", "rich/_emoji_codes.py", "rich/_emoji_replace.py"]
+    },
+    {
+      "name": "layout-region",
+      "query": "How is layout splitting and region management implemented?",
+      "relevant_files": ["rich/layout.py", "rich/region.py"]
+    },
+    {
+      "name": "screen-control",
+      "query": "How are cursor and screen control sequences emitted?",
+      "relevant_files": ["rich/control.py", "rich/screen.py", "rich/segment.py"]
+    }
+  ]
+}
