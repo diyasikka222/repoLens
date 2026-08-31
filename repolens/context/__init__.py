@@ -1,13 +1,14 @@
-"""Dependency-aware context engine (Milestone 12).
+"""Dependency-aware context engine with firewall (Milestones 12–13).
 
 RepoLens goes beyond retrieving relevant files: :class:`ContextEngine` turns a
 developer query into the smallest useful package of repository context an AI
-coding agent needs to understand a task.
+coding agent needs to understand a task.  The :class:`ContextFirewall` then
+inspects that package for potentially sensitive information before exposure.
 
 Pipeline::
 
     query → retrieval → candidates → dependency expansion → ranking →
-    budget → final context package
+    budget → ContextPackage → ContextFirewall → SafeContextPackage
 
 Public surface (kept small and composable):
 
@@ -21,6 +22,11 @@ Public surface (kept small and composable):
 - :class:`~repolens.context.package.ContextPackage` — the serializable result.
 - :func:`~repolens.context.tokens.estimate_tokens` — deterministic token estimate.
 - :func:`~repolens.context.render.render_context` — deterministic text rendering.
+- :class:`~repolens.context.firewall.ContextFirewall` — context firewall.
+- :class:`~repolens.context.firewall.FirewallConfig` — firewall policy.
+- :class:`~repolens.context.firewall.FirewallResult` — inspection result.
+- :class:`~repolens.context.firewall.SafeContextPackage` — safe context.
+- :class:`~repolens.context.firewall.FirewallDecision` — ALLOW/REDACT/BLOCK.
 
 No agents, MCP, CLI, or server are part of this milestone.
 """
@@ -32,6 +38,16 @@ from repolens.context.config import (
     RetrievalConfig,
 )
 from repolens.context.engine import ContextEngine
+from repolens.context.firewall import (
+    ContextFirewall,
+    Finding,
+    FirewallConfig,
+    FirewallDecision,
+    FirewallResult,
+    SafeContextCandidate,
+    SafeContextPackage,
+    Severity,
+)
 from repolens.context.package import ContextPackage
 from repolens.context.render import render_context
 from repolens.context.tokens import estimate_tokens
@@ -41,10 +57,18 @@ __all__ = [
     "ContextBudget",
     "ContextCandidate",
     "ContextEngine",
+    "ContextFirewall",
     "ContextPackage",
     "DependencyExpansionConfig",
     "ExcludedCandidate",
+    "Finding",
+    "FirewallConfig",
+    "FirewallDecision",
+    "FirewallResult",
     "RetrievalConfig",
+    "SafeContextCandidate",
+    "SafeContextPackage",
+    "Severity",
     "estimate_tokens",
     "render_context",
 ]

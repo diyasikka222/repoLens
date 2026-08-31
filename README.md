@@ -232,6 +232,129 @@ An engine can be built that uses RRF directly, but the design keeps retrieval
 behind the generic `Searcher` protocol, so any existing strategy composes
 cleanly and no retrieval code is duplicated.
 
+## Context Firewall
+
+Before a `ContextPackage` is handed to an AI agent, RepoLens inspects it for
+potentially sensitive information. The **Context Firewall**
+(`repolens.context.firewall`) sits between the context engine and the agent:
+
+```
+ContextEngine
+    ↓
+ContextPackage
+    ↓
+ContextFirewall
+    ↓
+SafeContextPackage
+```
+
+### Why the firewall exists
+
+Retrieval selects relevant files, but relevance does not guarantee safety. A
+`settings.py` might be highly relevant *and* contain an API key. The firewall
+is a deterministic, explainable, LLM-independent layer that classifies each
+candidate and produces a `SafeContextPackage` — the same metadata you trust,
+with only safe content.
+
+### The decision model
+
+Three explicit decisions:
+
+- **ALLOW** — expose the file as-is.
+- **REDACT** — the file is relevant, but sensitive portions are replaced
+  before exposure.
+- **BLOCK** — do not expose the file to the agent at all.
+
+The firewall does **not** block every file that mentions `token`, `password`,
+`secret`, or `auth`. A function like `def refresh_token(token): ...` remains
+allowed unless there is real evidence of a secret value.
+
+### Path-based detection
+
+Well-known secret-file names and extensions are BLOCKed regardless of content:
+
+- exact filenames such as `.env`, `id_rsa`, `id_dsa`, `id_ecdsa`,
+  `id_ed25519`;
+- extensions such as `.pem`, `.key`, `.p12`, `.pfx`;
+- `secret.*` / `secrets.*` config/data files (`.json`, `.yaml`, `.env`, etc.) —
+  *not* ordinary source modules like `secrets.py`.
+
+### Content-based detection
+
+Deterministic, high-confidence patterns for common secret material:
+
+- OpenAI-style API keys (`sk-...`);
+- AWS access key IDs (`AKIA...`);
+- GitHub personal-access / app tokens;
+- private-key blocks (`-----BEGIN ... PRIVATE KEY-----`);
+- database URLs with embedded credentials;
+- bearer tokens;
+- generic high-entropy secret-like assignments.
+
+The philosophy is **high precision > high recall**. False positives are
+dangerous because they can strip legitimate code from agent context, so the
+firewall only flags signals strong enough to be confident about. It does not
+attempt to detect every possible secret.
+
+Findings never contain the matched secret value. A finding is always safe to
+send to an agent:
+
+```json
+{
+  "path": "config.py",
+  "line": 42,
+  "type": "api_key",
+  "severity": "high",
+  "decision": "redact",
+  "reason": "Potential API credential detected"
+}
+```
+
+### Fail-closed behavior
+
+If a file cannot be inspected safely (e.g. an unexpected scanning error), the
+firewall **fails closed**: the file is BLOCKed rather than silently exposed,
+with a safe diagnostic reason and never the file's contents or secrets in the
+exception path.
+
+### Usage
+
+```python
+from repolens.context import (
+    ContextEngine, ContextBudget, ContextFirewall,
+)
+
+engine = ContextEngine("path/to/repo", budget=ContextBudget(max_tokens=8000))
+firewall = ContextFirewall()
+
+package = engine.build_context("Where is authentication handled?")
+
+result = firewall.inspect(package)      # FirewallResult
+safe = firewall.safe_package(package, result)   # SafeContextPackage
+
+print(safe.to_json())                    # secrets safe; metadata preserved
+```
+
+### Configuration
+
+`FirewallConfig` controls the policy with secure defaults (security is **ON**
+by default):
+
+- `enabled` — master switch (when `False`, everything passes through).
+- `blocked_filenames` / `blocked_extensions` — path rules.
+- `content_detectors` — which content detectors are active (disable any).
+- `redaction_placeholder` — the string replacing detected secrets
+  (default `[REDACTED]`).
+- `policy_version` — embedded in results for auditability.
+
+### A note on guarantees
+
+The firewall is a **defense-in-depth layer, not a guarantee** that all secrets
+are detected. Secret-scanning is not perfect; new formats and obfuscations
+appear constantly. RepoLens deliberately prioritizes precision to avoid
+falsely dropping legitimate code. No external secret-scanning service, network
+call, or LLM is used — it is fully offline and deterministic.
+
 ### OpenAI Embeddings (Optional)
 
 Requires a valid API key and available credits.
@@ -266,7 +389,7 @@ repolens/
   index.py               # Symbol index
   graph.py               # Dependency graph
   evaluation.py          # Retrieval quality evaluation
-  context/               # Dependency-aware context engine (Milestone 12)
+  context/               # Dependency-aware context engine (Milestone 12) + firewall (13)
     __init__.py          #   public API
     candidate.py         #   ContextCandidate / ExcludedCandidate / CandidateRole
     config.py            #   RetrievalConfig / DependencyExpansionConfig / ContextBudget
@@ -277,6 +400,17 @@ repolens/
     package.py           #   ContextPackage + JSON serialization
     render.py            #   render_context (agent text)
     tokens.py            #   estimate_tokens (deterministic approximation)
+    firewall/            #   Context firewall (Milestone 13)
+      __init__.py        #     public firewall API
+      config.py          #     FirewallConfig (policy, safe defaults)
+      decision.py        #     FirewallDecision (ALLOW/REDACT/BLOCK) + Severity
+      finding.py         #     Finding (safe, no secret values)
+      result.py          #     FirewallResult (structured inspection result)
+      path_rules.py      #     path-based BLOCK rules
+      content_detectors.py  # high-precision content detectors + redaction
+      firewall.py        #     ContextFirewall (inspect / safe_package)
+      safe_package.py    #     SafeContextPackage + SafeContextCandidate
+      render.py          #     render_safe_context
 benchmarks/
   evaluate_local_embeddings.py   # Local embedding evaluation
   evaluate_real_embeddings.py    # OpenAI embedding evaluation
@@ -290,5 +424,6 @@ tests/
   test_local_embeddings.py       # LocalEmbeddingProvider unit tests
   test_real_repo_benchmark.py    # Benchmark config/dataset tests (offline)
   test_context_engine.py         # Context-engine tests (offline)
+  test_context_firewall.py       # Firewall security tests (offline)
   ...
 ```
