@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import threading
 from typing import Callable
 
 from repolens.context import ContextEngine
@@ -86,26 +87,41 @@ def make_engine_factory(
 ) -> Callable[..., ContextEngine]:
     """Return a factory that builds a :class:`ContextEngine`.
 
-    A default engine is built once for the server's configured defaults.
-    Requests that override ``max_tokens`` or ``dependency_depth`` build a
-    purpose-configured engine for that call.
+    The repository root is validated eagerly so that bad paths fail fast at
+    server startup.  The default :class:`ContextEngine` is built **lazily** on
+    the first invocation of the returned factory, allowing the MCP stdio
+    transport to start without waiting for expensive repository indexing.
+
+    Once built, the default engine is cached and reused for subsequent
+    requests whose ``max_tokens`` / ``dependency_depth`` match the defaults.
+    Requests that override these parameters build a purpose-configured engine
+    for that call (existing behaviour preserved).
     """
     root = _resolve_root_for_factory(root, embedding_provider)
 
-    default_engine = build_engine(
-        root,
-        embedding_provider=embedding_provider,
-        max_tokens=default_max_tokens,
-        dependency_depth=default_dependency_depth,
-    )
+    lock = threading.Lock()
+    _cached_default_engine: list[ContextEngine | None] = [None]
 
     def factory(max_tokens=None, dependency_depth=None) -> ContextEngine:
-        if (
+        use_default = (
             max_tokens is None or max_tokens == default_max_tokens
         ) and (
-            dependency_depth is None or dependency_depth == default_dependency_depth
-        ):
-            return default_engine
+            dependency_depth is None
+            or dependency_depth == default_dependency_depth
+        )
+
+        if use_default:
+            if _cached_default_engine[0] is None:
+                with lock:
+                    if _cached_default_engine[0] is None:
+                        _cached_default_engine[0] = build_engine(
+                            root,
+                            embedding_provider=embedding_provider,
+                            max_tokens=default_max_tokens,
+                            dependency_depth=default_dependency_depth,
+                        )
+            return _cached_default_engine[0]
+
         return build_engine(
             root,
             embedding_provider=embedding_provider,

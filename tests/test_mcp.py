@@ -479,3 +479,116 @@ def test_launcher_logging_uses_stderr(monkeypatch) -> None:
     assert calls, "launcher._configure_logging should call basicConfig"
     assert calls[0]["stream"] is launcher.sys.stderr
     assert calls[0]["level"] == logging.INFO
+
+
+# ---------------------------------------------------------------------------
+# 10. Lazy ContextEngine initialization
+# ---------------------------------------------------------------------------
+
+# The MCP server must start its stdio transport without waiting for expensive
+# repository indexing.  ``make_engine_factory`` validates the root eagerly but
+# defers ``build_engine`` until the factory is actually called.
+
+
+def test_factory_returns_without_building_engine(tmp_path: Path, monkeypatch) -> None:
+    """make_engine_factory must not call build_engine before the factory is invoked."""
+    from repolens.mcp import launcher
+
+    build_calls: list = []
+
+    def spy_build_engine(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        # Return a minimal mock engine so the caller can inspect it.
+        return MockEngine(_package("q", _candidate("a.py", "x")))
+
+    monkeypatch.setattr(launcher, "build_engine", spy_build_engine)
+
+    # This must NOT trigger build_engine — only root validation.
+    factory = launcher.make_engine_factory(str(tmp_path))
+
+    assert build_calls == [], (
+        "build_engine must not be called during make_engine_factory"
+    )
+    assert callable(factory)
+
+
+def test_get_context_triggers_lazy_initialization(tmp_path: Path, monkeypatch) -> None:
+    """The first call to the factory triggers build_engine; a second call reuses it."""
+    from repolens.mcp import launcher
+
+    build_calls: list = []
+    mock_engine = MockEngine(_package("q", _candidate("a.py", "x")))
+
+    def spy_build_engine(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        return mock_engine
+
+    monkeypatch.setattr(launcher, "build_engine", spy_build_engine)
+
+    factory = launcher.make_engine_factory(str(tmp_path))
+
+    # First invocation — should build.
+    engine = factory()
+    assert len(build_calls) == 1, "First factory call should trigger build_engine"
+    assert engine is mock_engine
+
+    # Second invocation — should NOT build again (cached).
+    engine2 = factory()
+    assert len(build_calls) == 1, "Second factory call should reuse the cached engine"
+    assert engine2 is mock_engine
+
+
+def test_default_engine_cached_reused(tmp_path: Path, monkeypatch) -> None:
+    """Repeated default-parameter calls must reuse the single cached engine."""
+    from repolens.mcp import launcher
+
+    build_calls: list = []
+    mock_engine = MockEngine(_package("q", _candidate("a.py", "x")))
+
+    def spy_build_engine(*args, **kwargs):
+        build_calls.append(kwargs)
+        return mock_engine
+
+    monkeypatch.setattr(launcher, "build_engine", spy_build_engine)
+
+    factory = launcher.make_engine_factory(str(tmp_path))
+
+    # Call with None (default) multiple times.
+    factory()
+    factory(max_tokens=None)
+    factory(dependency_depth=None)
+
+    assert len(build_calls) == 1, (
+        "All default-parameter calls should reuse the single cached engine"
+    )
+
+
+def test_non_default_params_bypass_cache(tmp_path: Path, monkeypatch) -> None:
+    """Requests with overridden parameters build a fresh engine each time."""
+    from repolens.mcp import launcher
+
+    engines: list = []
+
+    def spy_build_engine(*args, **kwargs):
+        eng = MockEngine(_package("q", _candidate("a.py", "x")))
+        engines.append(eng)
+        return eng
+
+    monkeypatch.setattr(launcher, "build_engine", spy_build_engine)
+
+    factory = launcher.make_engine_factory(str(tmp_path))
+
+    # Default call — builds once.
+    e1 = factory()
+    assert len(engines) == 1
+
+    # Non-default call — builds a new engine.
+    e2 = factory(max_tokens=500)
+    assert len(engines) == 2
+    assert e2 is not e1
+
+    # Another non-default call — builds another.
+    e3 = factory(dependency_depth=3)
+    assert len(engines) == 3
+    assert e3 is not e1
+    assert e3 is not e2
