@@ -355,6 +355,154 @@ appear constantly. RepoLens deliberately prioritizes precision to avoid
 falsely dropping legitimate code. No external secret-scanning service, network
 call, or LLM is used — it is fully offline and deterministic.
 
+## MCP Server (`get_context`)
+
+RepoLens exposes its context engine to AI coding agents through the **Model
+Context Protocol (MCP)**. MCP is currently a **local stdio integration**; no
+IDE-specific integration is bundled or claimed.
+
+### What MCP does in RepoLens
+
+The MCP layer is a **thin adapter**. It does not re-implement retrieval,
+ranking, budgeting, or security. It simply connects an agent to the existing
+public RepoLens APIs and returns firewall-cleared context:
+
+```
+Agent
+  ↓
+MCP (get_context)
+  ↓
+Context Firewall
+  ↓
+Context Engine
+  ↓
+Retrieval / Graph
+```
+
+The tool accepts an agent query (and optional `max_tokens` /
+`dependency_depth`), builds a `ContextPackage`, passes it through the
+`ContextFirewall`, and returns **only** the safe result. The raw
+`ContextPackage` is never exposed.
+
+### The `get_context` tool
+
+`get_context(query, max_tokens=..., dependency_depth=...)`
+
+- `query` *(required)* — the developer query. Must be a non-empty string.
+- `max_tokens` *(optional)* — a positive context budget in estimated tokens.
+- `dependency_depth` *(optional)* — a non-negative dependency graph depth.
+
+The response is structured JSON including the query, selected files with
+selection reasons, estimated token count, budget, firewall decisions, and a
+rendered safe context.
+
+### Launching the server
+
+```bash
+python -m repolens.mcp --repo /path/to/repository
+```
+
+The repository root is configured at launch time and is **not** supplied by
+tool callers. The server rejects attempts to reach files outside the
+configured root; `get_context` is the only tool, and it cannot be asked to
+read arbitrary paths.
+
+Supported flags:
+
+- `--repo <path>` *(required)* — the repository to index.
+- `--default-max-tokens <n>` — default budget (default `8000`).
+- `--default-dependency-depth <n>` — default graph depth (default `1`).
+- `--use-local-embeddings` — use the on-device local embedding provider
+  (requires a one-time model download on first use; no API key required).
+- `--log-level <level>` — diagnostics verbosity on stderr (default
+  `WARNING`).
+
+To install the MCP extra: `pip install "repolens[mcp]"`.
+
+### Connecting an MCP-compatible local client
+
+Point your MCP-compatible client at a command such as:
+
+```
+python -m repolens.mcp --repo /path/to/repository
+```
+
+using the MCP **stdio** transport. Any client that supports launching a
+stdio MCP server can connect. RepoLens does not currently provide HTTP/SSE
+transports or an authentication layer.
+
+> Note: RepoLens is tested with the official MCP Python SDK via stdio. No
+> specific IDE integration has been tested or is claimed.
+
+### How local embeddings work with MCP
+
+By default the MCP server uses RepoLens' deterministic, fully-offline fake
+embedding provider, so it works with **no API key and no model download**. To
+enable on-device semantic retrieval, pass `--use-local-embeddings` (uses
+`LocalEmbeddingProvider`, which downloads a model on first use and then runs
+offline). No OpenAI key is ever required.
+
+### Security boundary
+
+MCP is treated as an **untrusted caller boundary**. A caller can request
+context but cannot:
+
+- choose arbitrary filesystem paths;
+- bypass the context firewall;
+- request blocked files directly;
+- disable security policy;
+- retrieve raw repository files;
+- access environment variables, API keys, or files outside the configured
+  repository.
+
+Errors returned to the agent are concise and safe — no stack traces,
+environment variables, or secret values. Diagnostics go to stderr via the
+standard `logging` module; MCP communicates over stdout, so nothing else is
+written to stdout while the server runs.
+
+### Current limitations
+
+- stdio transport only (no HTTP/SSE/authentication).
+- Single repository per server.
+- Single tool (`get_context`); no MCP resources or prompts yet.
+- `max_tokens` / `dependency_depth` overrides build a purpose-configured
+  engine for that request.
+- The server is a defense-in-depth layer, not a guarantee that all secrets
+  are detected.
+
+### Example tool request
+
+```json
+{ "query": "Where is authentication handled?", "max_tokens": 8000 }
+```
+
+### Example response
+
+```json
+{
+  "status": "ok",
+  "query": "Where is authentication handled?",
+  "budget": { "max_tokens": 8000 },
+  "total_estimated_tokens": 171,
+  "selected_files": [
+    {
+      "path": "auth/passwords.py",
+      "role": "primary",
+      "decision": "allow",
+      "estimated_tokens": 60,
+      "selection_reason": "retrieved as primary result at rank 1"
+    }
+  ],
+  "blocked_files": [],
+  "firewall": {
+    "enabled": true,
+    "policy_version": "1.0.0",
+    "findings": []
+  },
+  "rendered_safe_context": "# RepoLens Safe Context\n..."
+}
+```
+
 ### OpenAI Embeddings (Optional)
 
 Requires a valid API key and available credits.
@@ -411,6 +559,14 @@ repolens/
       firewall.py        #     ContextFirewall (inspect / safe_package)
       safe_package.py    #     SafeContextPackage + SafeContextCandidate
       render.py          #     render_safe_context
+    mcp/                 #   MCP server / tool adapter (Milestone 14)
+      __init__.py        #     public MCP API
+      __main__.py        #     python -m repolens.mcp
+      launcher.py        #     minimal --repo CLI launcher
+      server.py          #     build_mcp_server (registers get_context)
+      tool.py            #     get_context handler + input validation
+      deps.py            #     engine/firewall wiring + repo-root validation
+      errors.py          #     safe MCP error types
 benchmarks/
   evaluate_local_embeddings.py   # Local embedding evaluation
   evaluate_real_embeddings.py    # OpenAI embedding evaluation
@@ -425,5 +581,6 @@ tests/
   test_real_repo_benchmark.py    # Benchmark config/dataset tests (offline)
   test_context_engine.py         # Context-engine tests (offline)
   test_context_firewall.py       # Firewall security tests (offline)
+  test_mcp.py                    # MCP server tests (offline)
   ...
 ```
