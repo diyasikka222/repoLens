@@ -174,9 +174,16 @@ class CodeSearcher:
     :meth:`search` call is pure computation over that index.
     """
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(
+        self, root: Path | str, *, index: object | None = None
+    ) -> None:
         self.root = Path(root)
         self._parser = PythonParser()
+        if index is not None:
+            self._paths = list(index.files)
+            self._symbols_by_path = _group_symbols_by_path_from(index.symbols)
+            self._records = tuple(self._build_records_from_index(index))
+            return
         self._paths = RepositoryScanner(self.root).discover_python_files()
         self._symbols_by_path = self._group_symbols_by_path()
         self._records = tuple(self._build_records())
@@ -223,6 +230,34 @@ class CodeSearcher:
                 symbols=tuple(self._symbol_entries(path)),
             )
 
+    def _build_records_from_index(self, index) -> Iterator[_FileRecord]:
+        """Build search records from an already-parsed incremental snapshot."""
+        for path in self._paths:
+            source = index.source_for(path)
+            analysis = index.analysis_for(path)
+            source_tokens = frozenset(tokenize(source))
+            import_tokens = _import_tokens_from(analysis)
+            yield _FileRecord(
+                path=path,
+                path_tokens=frozenset(tokenize(path.with_suffix("").as_posix())),
+                import_tokens=import_tokens,
+                source_tokens=source_tokens,
+                symbols=tuple(self._symbol_entries_from(index, path)),
+            )
+
+    def _symbol_entries_from(self, index, path: Path) -> Iterator[_SymbolEntry]:
+        for symbol in index.symbols:
+            if symbol.file_path != path:
+                continue
+            tokens = tokenize(symbol.name)
+            if symbol.parent_class:
+                tokens.extend(tokenize(symbol.parent_class))
+            yield _SymbolEntry(
+                symbol=symbol,
+                tokens=frozenset(tokens),
+                compact_name="".join(tokenize(symbol.name)),
+            )
+
     def _symbol_entries(self, path: Path) -> Iterator[_SymbolEntry]:
         for symbol in self._symbols_by_path.get(path, []):
             tokens = tokenize(symbol.name)
@@ -240,17 +275,7 @@ class CodeSearcher:
             analysis = self._parser.parse_source(source, file_path=path)
         except (OSError, SyntaxError, ValueError):
             return frozenset(), frozenset()
-        import_tokens: set[str] = set()
-        for imported in analysis.imports:
-            import_tokens.update(tokenize(imported.module))
-            if imported.alias:
-                import_tokens.update(tokenize(imported.alias))
-        for from_import in analysis.from_imports:
-            import_tokens.update(tokenize(from_import.module))
-            import_tokens.update(tokenize(from_import.name))
-            if from_import.alias:
-                import_tokens.update(tokenize(from_import.alias))
-        return frozenset(tokenize(source)), frozenset(import_tokens)
+        return frozenset(tokenize(source)), _import_tokens_from(analysis)
 
     def _score(
         self, record: _FileRecord, terms: list[str]
@@ -284,3 +309,27 @@ class CodeSearcher:
                 hits.add(term)
         matched_terms = tuple(term for term in terms if term in hits)
         return score, matched_terms, tuple(matched_symbols)
+
+
+def _import_tokens_from(analysis) -> frozenset[str]:
+    """Collect import/module tokens from a parsed analysis."""
+    import_tokens: set[str] = set()
+    for imported in analysis.imports:
+        import_tokens.update(tokenize(imported.module))
+        if imported.alias:
+            import_tokens.update(tokenize(imported.alias))
+    for from_import in analysis.from_imports:
+        import_tokens.update(tokenize(from_import.module))
+        import_tokens.update(tokenize(from_import.name))
+        if from_import.alias:
+            import_tokens.update(tokenize(from_import.alias))
+    return frozenset(import_tokens)
+
+
+def _group_symbols_by_path_from(
+    symbols: Iterable[Symbol],
+) -> dict[Path, list[Symbol]]:
+    by_path: dict[Path, list[Symbol]] = defaultdict(list)
+    for symbol in symbols:
+        by_path[symbol.file_path].append(symbol)
+    return dict(by_path)

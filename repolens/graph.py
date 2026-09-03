@@ -59,15 +59,36 @@ class _ModuleIndex:
 
 
 class DependencyGraphBuilder:
-    """Builds a :class:`DependencyGraph` by scanning and parsing a repository."""
+    """Builds a :class:`DependencyGraph` by scanning and parsing a repository.
 
-    def __init__(self, root: Path | str) -> None:
+    Pass an optional prebuilt snapshot (``index``, from
+    :mod:`repolens.incremental_index`) to build from already parsed analyses
+    without re-parsing.
+    """
+
+    def __init__(
+        self, root: Path | str, *, index: object | None = None
+    ) -> None:
         self.root = Path(root)
-        self._scanner = RepositoryScanner(self.root)
+        self._scanner = RepositoryScanner(self.root) if index is None else None
         self._parser = PythonParser()
+        self._index = index
 
     def build(self) -> DependencyGraph:
         """Scan the repository and derive all internal import edges."""
+        if self._index is not None:
+            files = list(self._index.files)
+            index = _ModuleIndex(files)
+            edges = {
+                DependencyEdge(source=file_path, target=target)
+                for file_path in files
+                for target in self._dependencies_of(
+                    file_path,
+                    self._index.analysis_for(file_path),
+                    index,
+                )
+            }
+            return DependencyGraph(root=self.root, nodes=files, edges=edges)
         files = self._scanner.discover_python_files()
         index = _ModuleIndex(files)
         edges = {

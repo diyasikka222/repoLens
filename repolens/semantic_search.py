@@ -119,12 +119,15 @@ class SemanticSearcher:
         candidate_searcher: CodeSearcher | None = None,
         candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
         cache: EmbeddingCache | None = None,
+        index: object | None = None,
     ) -> None:
         self.root = Path(root)
         self._provider = provider
         self._parser = PythonParser()
         self._candidate_searcher = (
-            candidate_searcher if candidate_searcher is not None else CodeSearcher(self.root)
+            candidate_searcher
+            if candidate_searcher is not None
+            else CodeSearcher(self.root, index=index)
         )
         self._candidate_limit = candidate_limit
         self._cache = cache
@@ -132,7 +135,11 @@ class SemanticSearcher:
             self._embedding_identity = normalize_embedding_identity(provider)
         else:
             self._embedding_identity = None
-        self._symbols_by_path = self._group_symbols_by_path()
+        self._index = index
+        if index is not None:
+            self._symbols_by_path = self._group_symbols_by_path_from_index(index)
+        else:
+            self._symbols_by_path = self._group_symbols_by_path()
         self._vectors_by_path: dict[Path, Vector] = {}
         self.cache_stats = {"hits": 0, "misses": 0, "embedded_documents": 0}
 
@@ -236,7 +243,18 @@ class SemanticSearcher:
             by_path[symbol.file_path].append(symbol)
         return {path: tuple(symbols) for path, symbols in by_path.items()}
 
+    def _group_symbols_by_path_from_index(
+        self, index
+    ) -> dict[Path, tuple[Symbol, ...]]:
+        by_path: dict[Path, list[Symbol]] = defaultdict(list)
+        for symbol in index.symbols:
+            by_path[symbol.file_path].append(symbol)
+        return {path: tuple(symbols) for path, symbols in by_path.items()}
+
     def _read_file(self, path: Path) -> tuple[str, ModuleAnalysis | None]:
+        if self._index is not None:
+            source = self._index.source_for(path)
+            return source, self._index.analysis_for(path)
         try:
             source = (self.root / path).read_text(encoding="utf-8")
         except (OSError, ValueError):

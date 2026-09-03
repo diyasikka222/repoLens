@@ -47,13 +47,14 @@ class RetrievalConfig:
         *,
         embedding_provider: Optional[EmbeddingProvider] = None,
         embedding_cache: Optional[EmbeddingCache] = None,
+        index: Optional[object] = None,
     ) -> Searcher:
         """Construct the configured Searcher from existing RepoLens components."""
         root_path = Path(root)
         if self.strategy == "lexical":
             from repolens.search import CodeSearcher
 
-            return CodeSearcher(root_path)
+            return CodeSearcher(root_path, index=index)
         if self.strategy == "semantic":
             if embedding_provider is None:
                 from repolens.embeddings import FakeEmbeddingProvider
@@ -65,8 +66,9 @@ class RetrievalConfig:
             return SemanticSearcher(
                 root_path,
                 embedding_provider,
-                candidate_searcher=CodeSearcher(root_path),
+                candidate_searcher=CodeSearcher(root_path, index=index),
                 cache=embedding_cache,
+                index=index,
             )
         if self.strategy in ("rrf", "weighted"):
             from repolens.retrieval import FusionStrategy, HybridSearcher
@@ -77,12 +79,13 @@ class RetrievalConfig:
                 from repolens.embeddings import FakeEmbeddingProvider
 
                 embedding_provider = FakeEmbeddingProvider()
-            lexical = CodeSearcher(root_path)
+            lexical = CodeSearcher(root_path, index=index)
             semantic = SemanticSearcher(
                 root_path,
                 embedding_provider,
                 candidate_searcher=lexical,
                 cache=embedding_cache,
+                index=index,
             )
             strategy = (
                 FusionStrategy.RRF if self.strategy == "rrf" else FusionStrategy.WEIGHTED

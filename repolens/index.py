@@ -37,15 +37,33 @@ class Symbol:
 
 
 class SymbolIndexBuilder:
-    """Builds a :class:`SymbolIndex` by scanning and parsing a repository."""
+    """Builds a :class:`SymbolIndex` by scanning and parsing a repository.
 
-    def __init__(self, root: Path | str) -> None:
+    Pass an optional prebuilt :class:`Repaindex`-style snapshot (from
+    :mod:`repolens.incremental_index`) as ``index`` to build from already
+    parsed :class:`ModuleAnalysis` without re-parsing the repository.
+    """
+
+    def __init__(
+        self, root: Path | str, *, index: object | None = None
+    ) -> None:
         self.root = Path(root)
-        self._scanner = RepositoryScanner(self.root)
+        self._scanner = RepositoryScanner(self.root) if index is None else None
         self._parser = PythonParser()
+        self._index = index
 
     def build(self) -> SymbolIndex:
         """Scan the repository and index every definition found."""
+        if self._index is not None:
+            symbols = getattr(self._index, "symbols", None)
+            if symbols is not None:
+                return SymbolIndex(symbols)
+            # Fall back to deriving symbols from per-file analyses.
+            return SymbolIndex(
+                symbol
+                for path in self._index.files
+                for symbol in _symbols_from(self._index.analysis_for(path), path)
+            )
         return SymbolIndex(
             symbol
             for file_path in self._scanner.discover_python_files()
@@ -79,6 +97,31 @@ class SymbolIndexBuilder:
                     line=method.line,
                     parent_class=class_.name,
                 )
+
+
+def _symbols_from(analysis: ModuleAnalysis, file_path: Path) -> Iterable[Symbol]:
+    for function in analysis.functions:
+        yield Symbol(
+            name=function.name,
+            kind=SymbolKind.FUNCTION,
+            file_path=file_path,
+            line=function.line,
+        )
+    for class_ in analysis.classes:
+        yield Symbol(
+            name=class_.name,
+            kind=SymbolKind.CLASS,
+            file_path=file_path,
+            line=class_.line,
+        )
+        for method in class_.methods:
+            yield Symbol(
+                name=method.name,
+                kind=SymbolKind.METHOD,
+                file_path=file_path,
+                line=method.line,
+                parent_class=class_.name,
+            )
 
 
 def _sort_key(symbol: Symbol) -> tuple[str, int, str]:

@@ -69,6 +69,7 @@ class ContextEngine:
         dependency: DependencyExpansionConfig | None = None,
         budget: ContextBudget | None = None,
         embedding_provider=None,
+        index: object | None = None,
         primary_limit: int = DEFAULT_PRIMARY_LIMIT,
     ) -> None:
         self.root = Path(root)
@@ -80,12 +81,16 @@ class ContextEngine:
             self._primary_limit = primary_limit
         else:
             cfg = retrieval if retrieval is not None else RetrievalConfig()
-            self._searcher = cfg.build_searcher(self.root, embedding_provider=embedding_provider)
+            self._searcher = cfg.build_searcher(
+                self.root,
+                embedding_provider=embedding_provider,
+                index=index,
+            )
             self._primary_limit = cfg.limit
 
         self._dep_config = dependency if dependency is not None else DependencyExpansionConfig()
         self._budget = budget if budget is not None else ContextBudget()
-        self._graph = DependencyGraphBuilder(self.root).build()
+        self._graph = DependencyGraphBuilder(self.root, index=index).build()
 
     def build_context(self, query: str) -> ContextPackage:
         """Compute a context package for ``query``."""

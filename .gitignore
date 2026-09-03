@@ -35,5 +35,11 @@ models/
 .repolens_embeddings/
 **/.repolens_embeddings/
 
+# RepoLens incremental index cache (M18)
+# Default location is ~/.cache/repolens/index/ (outside any repository).
+# Guard against a REPOLENS_CACHE_DIR override pointing into a repository.
+.repolens-index/
+**/.repolens-index/
+
 # Real-world benchmark data (external repository downloads)
 .benchmark_data/

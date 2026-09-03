@@ -95,10 +95,12 @@ def build_engine(
 
     retrieval = RetrievalConfig()
     try:
+        index = _build_index(root_path)
         searcher = retrieval.build_searcher(
             root_path,
             embedding_provider=embedding_provider,
             embedding_cache=_build_cache(root_path),
+            index=index,
         )
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(
@@ -115,6 +117,7 @@ def build_engine(
             searcher=searcher,
             budget=budget,
             dependency=dep_cfg,
+            index=index,
         )
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(
@@ -172,3 +175,24 @@ def _build_cache(root: Path):
             "embedding cache unavailable: %s", type(exc).__name__
         )
         return None
+
+
+def _build_index(root: Path):
+    """Build the shared incremental :class:`RepositoryIndex` for ``root``.
+
+    Uses a persistent cache located below the RepoLens cache base (independent
+    of the embedding cache: ``<cache>/repolens/index/<repo-hash>/``). When
+    caching is disabled the index is built with an ephemeral in-memory cache so
+    engine behavior is otherwise unchanged.
+    """
+    from repolens.incremental_index import IncrementalIndexBuilder
+
+    if os.environ.get("REPOLENS_CACHE_DISABLED") or os.environ.get("REPOLENS_CACHE_DIR") == "":
+        builder = IncrementalIndexBuilder(root, persist=False)
+    else:
+        from repolens.embedding_cache import repository_identity
+        from repolens.incremental_index import home_cache_base
+
+        cache_dir = home_cache_base() / "index" / repository_identity(root)
+        builder = IncrementalIndexBuilder(root, cache_dir=cache_dir)
+    return builder.build()
