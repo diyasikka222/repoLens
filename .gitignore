@@ -26,5 +26,14 @@ htmlcov/
 .cache/
 models/
 
+# RepoLens persistent embedding cache
+# Default location is ~/.cache/repolens/ (outside any repository), so it is
+# inherently untracked. These patterns guard against a REPOLENS_CACHE_DIR
+# override pointing into a repository.
+.repolens-cache/
+**/.repolens-cache/
+.repolens_embeddings/
+**/.repolens_embeddings/
+
 # Real-world benchmark data (external repository downloads)
 .benchmark_data/

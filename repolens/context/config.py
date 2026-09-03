@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from repolens.embedding_cache import EmbeddingCache
 from repolens.embeddings import EmbeddingProvider
 from repolens.evaluation import Searcher
 
@@ -45,6 +46,7 @@ class RetrievalConfig:
         root: Path | str,
         *,
         embedding_provider: Optional[EmbeddingProvider] = None,
+        embedding_cache: Optional[EmbeddingCache] = None,
     ) -> Searcher:
         """Construct the configured Searcher from existing RepoLens components."""
         root_path = Path(root)
@@ -64,6 +66,7 @@ class RetrievalConfig:
                 root_path,
                 embedding_provider,
                 candidate_searcher=CodeSearcher(root_path),
+                cache=embedding_cache,
             )
         if self.strategy in ("rrf", "weighted"):
             from repolens.retrieval import FusionStrategy, HybridSearcher
@@ -79,6 +82,7 @@ class RetrievalConfig:
                 root_path,
                 embedding_provider,
                 candidate_searcher=lexical,
+                cache=embedding_cache,
             )
             strategy = (
                 FusionStrategy.RRF if self.strategy == "rrf" else FusionStrategy.WEIGHTED

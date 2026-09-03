@@ -16,6 +16,7 @@ enable local, on-device semantic retrieval without OpenAI.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -95,7 +96,9 @@ def build_engine(
     retrieval = RetrievalConfig()
     try:
         searcher = retrieval.build_searcher(
-            root_path, embedding_provider=embedding_provider,
+            root_path,
+            embedding_provider=embedding_provider,
+            embedding_cache=_build_cache(root_path),
         )
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(
@@ -146,3 +149,26 @@ def resolve_embedding_provider(prefer_local: bool):
     if _model:
         return LocalEmbeddingProvider(model=_model)
     return LocalEmbeddingProvider()
+
+
+def _build_cache(root: Path):
+    """Return a persistent embedding cache for ``root``, or ``None``.
+
+    Returns ``None`` when the cache is disabled via ``REPOLENS_CACHE_DIR=
+    ""`` (empty) or ``REPOLENS_CACHE_DISABLED``. Creating the directory is
+    deferred to the cache object; for lexical-only retrieval the searcher
+    simply never touches it.
+    """
+    if os.environ.get("REPOLENS_CACHE_DISABLED"):
+        return None
+    if os.environ.get("REPOLENS_CACHE_DIR") == "":
+        return None
+    from repolens.embedding_cache import make_repo_cache
+
+    try:
+        return make_repo_cache(root)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("repolens.mcp.deps").warning(
+            "embedding cache unavailable: %s", type(exc).__name__
+        )
+        return None

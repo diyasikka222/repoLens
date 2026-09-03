@@ -45,6 +45,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from repolens.embedding_cache import EmbeddingCache, content_identity, normalize_embedding_identity
 from repolens.embeddings import EmbeddingProvider, Vector
 from repolens.index import Symbol, SymbolIndexBuilder
 from repolens.parser import ModuleAnalysis, PythonParser
@@ -100,6 +101,14 @@ class SemanticSearcher:
     single query. Candidate embeddings are cached per file, so repeated or
     overlapping queries reuse already-embedded documents instead of
     re-embedding them.
+
+    An optional persistent :class:`~repolens.embedding_cache.EmbeddingCache`
+    (``cache=...``) extends that reuse across process/MCP restarts. On a cold
+    cache each candidate is looked up by ``(path, content hash, embedding
+    identity)``; only genuine misses are embedded, and freshly embedded
+    vectors are written back. The in-memory dictionary remains the fast path
+    within a process, so the persistent cache never regresses repeated-search
+    latency.
     """
 
     def __init__(
@@ -109,6 +118,7 @@ class SemanticSearcher:
         *,
         candidate_searcher: CodeSearcher | None = None,
         candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
+        cache: EmbeddingCache | None = None,
     ) -> None:
         self.root = Path(root)
         self._provider = provider
@@ -117,8 +127,14 @@ class SemanticSearcher:
             candidate_searcher if candidate_searcher is not None else CodeSearcher(self.root)
         )
         self._candidate_limit = candidate_limit
+        self._cache = cache
+        if cache is not None:
+            self._embedding_identity = normalize_embedding_identity(provider)
+        else:
+            self._embedding_identity = None
         self._symbols_by_path = self._group_symbols_by_path()
         self._vectors_by_path: dict[Path, Vector] = {}
+        self.cache_stats = {"hits": 0, "misses": 0, "embedded_documents": 0}
 
     def search(
         self, query: str, limit: int = DEFAULT_LIMIT
@@ -156,26 +172,62 @@ class SemanticSearcher:
         ]
 
     def _ensure_embeddings(self, candidate_paths: list[Path]) -> None:
-        """Embed the candidate documents that are not already cached.
+        """Embed the candidate documents that are not already available.
 
-        Documents already embedded by an earlier query are reused; only the
-        newly-seen candidates are handed to the provider in one batch.
+        A document is reused if it is already in the in-memory fast layer
+        (cached from an earlier query in this process). Otherwise:
+
+        - read the file once and compute its content identity;
+        - consult the persistent cache (if any): a matching entry is loaded
+          without calling the provider;
+        - only genuine misses are handed to the provider, and any vector just
+          produced is written back to the persistent cache (if any).
+
+        Files are read at most once per candidate batch; content hashing is
+        derived from that single read, so no unnecessary filesystem work is
+        done.
         """
         missing = [path for path in candidate_paths if path not in self._vectors_by_path]
         if not missing:
             return
-        documents = [
-            self._compose_document(
-                path,
-                *self._read_file(path),
-                self._symbols_by_path.get(path, ()),
+
+        cache = self._cache
+        documents: dict[Path, str] = {}
+        content_ids: dict[Path, str] | None = None
+        if cache is not None:
+            content_ids = {}
+        for path in missing:
+            source, analysis = self._read_file(path)
+            if content_ids is not None:
+                content_ids[path] = content_identity(source.encode("utf-8"))
+            documents[path] = self._compose_document(
+                path, source, analysis, self._symbols_by_path.get(path, ())
             )
-            for path in missing
-        ]
-        for path, vector in zip(
-            missing, self._provider.embed_texts(documents)
-        ):
+
+        if cache is not None:
+            for path in list(missing):
+                cached = cache.lookup(
+                    path.as_posix(), content_ids[path], self._embedding_identity
+                )
+                if cached is not None:
+                    self._vectors_by_path[path] = cached
+                    missing.remove(path)
+                    self.cache_stats["hits"] += 1
+                else:
+                    self.cache_stats["misses"] += 1
+
+        if not missing:
+            return
+
+        new_documents = [documents[path] for path in missing]
+        new_vectors = self._provider.embed_texts(new_documents)
+        for path, vector in zip(missing, new_vectors):
             self._vectors_by_path[path] = vector
+            self.cache_stats["embedded_documents"] += 1
+            if cache is not None:
+                cache.store(
+                    path.as_posix(), content_ids[path], self._embedding_identity, vector
+                )
 
     def _group_symbols_by_path(self) -> dict[Path, tuple[Symbol, ...]]:
         by_path: dict[Path, list[Symbol]] = defaultdict(list)
