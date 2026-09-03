@@ -61,8 +61,14 @@ def expand_dependencies(
     if depth == 0:
         return []
 
+    max_expanded = getattr(config, "max_expanded", None)
+    if max_expanded is not None and max_expanded < 0:
+        raise ValueError(f"max_expanded must be >= 0, got {max_expanded}")
+
     seed_set = set(seeds)
     result: dict[Path, ExpandedNode] = {}
+    # A cheap order of discovery; used to enforce max_expanded deterministically.
+    discovered: list[Path] = []
 
     # (path, role, distance) frontier. Each seed is visited at distance 0.
     frontier: deque[tuple[Path, CandidateRole, int]] = deque(
@@ -87,6 +93,7 @@ def expand_dependencies(
                 _record_and_enqueue(
                     result, frontier, neighbor,
                     role=CandidateRole.DEPENDENCY, distance=distance + 1,
+                    discovered=discovered, max_expanded=max_expanded,
                 )
         # Reverse: dependents of `path` (files that import it).
         if config.include_dependents:
@@ -96,6 +103,7 @@ def expand_dependencies(
                 _record_and_enqueue(
                     result, frontier, neighbor,
                     role=CandidateRole.DEPENDENT, distance=distance + 1,
+                    discovered=discovered, max_expanded=max_expanded,
                 )
 
     return _ordered(result)
@@ -108,11 +116,16 @@ def _record_and_enqueue(
     *,
     role: CandidateRole,
     distance: int,
+    discovered: list[Path],
+    max_expanded: int | None,
 ) -> None:
     if path in result:
         return
+    if max_expanded is not None and len(discovered) >= max_expanded:
+        return
     node = ExpandedNode(path=path, role=role, distance=distance)
     result[path] = node
+    discovered.append(path)
     frontier.append((path, role, distance))
 
 

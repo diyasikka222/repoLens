@@ -28,6 +28,18 @@ class CandidateRole(str, Enum):
     DEPENDENT = "dependent"
 
 
+#: Machine-readable inclusion categories (Milestone 19).
+#: These are stable tokens exposed alongside the human-readable
+#: ``selection_reason`` so downstream consumers can reason about *why* a file
+#: was included without parsing prose.
+INCLUSION_SYMBOL_MATCH = "symbol_match"
+INCLUSION_LEXICAL_MATCH = "lexical_match"
+INCLUSION_SEMANTIC_MATCH = "semantic_match"
+INCLUSION_HYBRID_MATCH = "hybrid_match"
+INCLUSION_DEPENDENCY = "dependency"
+INCLUSION_DEPENDENT = "dependent"
+
+
 @dataclass(frozen=True)
 class ContextCandidate:
     """One repository file proposed for the final context package."""
@@ -46,6 +58,9 @@ class ContextCandidate:
 
     # Graph information (None for primary candidates).
     graph_distance: int | None = None
+
+    # Machine-readable inclusion category (Milestone 19).
+    inclusion_reason: str | None = None
 
 
 @dataclass(frozen=True)

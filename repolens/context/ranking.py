@@ -20,7 +20,11 @@ use an LLM, and it introduces no tunable coefficients.
 
 from __future__ import annotations
 
-from repolens.context.candidate import CandidateRole, ContextCandidate
+from repolens.context.candidate import (
+    INCLUSION_SYMBOL_MATCH,
+    CandidateRole,
+    ContextCandidate,
+)
 
 
 def _candidate_key(candidate: ContextCandidate) -> tuple:
@@ -32,9 +36,16 @@ def _candidate_key(candidate: ContextCandidate) -> tuple:
             else 10**9
         )
         score = candidate.retrieval_score if candidate.retrieval_score is not None else 0.0
+        # Symbol-matched primaries outrank equally-retrieved non-symbol matches,
+        # *after* the existing retrieval-rank order is respected. Defaults
+        # (inclusion_reason is None) leave the historical ordering unchanged.
+        symbol_boost = (
+            0 if candidate.inclusion_reason == INCLUSION_SYMBOL_MATCH else 1
+        )
         return (
             0,
             primary_rank,
+            symbol_boost,
             -score,
             candidate.path.as_posix(),
         )

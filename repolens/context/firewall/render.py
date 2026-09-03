@@ -64,6 +64,8 @@ def _render_safe_candidate(candidate: SafeContextCandidate) -> list[str]:
     lines.append(f"### {candidate.path}")
     lines.append(f"Decision: {candidate.decision.upper()}")
     lines.append(f"Reason: {candidate.selection_reason}")
+    if candidate.inclusion_reason:
+        lines.append(f"Inclusion: {candidate.inclusion_reason}")
     lines.append(f"Estimated tokens: {candidate.estimated_tokens}")
     if candidate.retrieval_rank is not None:
         lines.append(f"Retrieval rank: {candidate.retrieval_rank}")

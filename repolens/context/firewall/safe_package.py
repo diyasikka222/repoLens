@@ -34,6 +34,7 @@ class SafeContextCandidate:
     lexical_rank: int | None = None
     semantic_rank: int | None = None
     graph_distance: int | None = None
+    inclusion_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,8 @@ class SafeContextPackage:
     findings: tuple[Finding, ...] = ()
     firewall_enabled: bool = True
     policy_version: str = "1.0.0"
+    intent: str | None = None
+    matched_symbols: tuple[str, ...] = ()
 
     @property
     def total_estimated_tokens(self) -> int:
@@ -67,8 +70,13 @@ class SafeContextPackage:
         """Return a JSON-serializable dictionary."""
         return {
             "query": self.query,
-            "budget": {"max_tokens": self.budget.max_tokens},
+            "budget": {
+                "max_tokens": self.budget.max_tokens,
+                "truncate_oversized": self.budget.truncate_oversized,
+            },
             "total_estimated_tokens": self.total_estimated_tokens,
+            "intent": self.intent,
+            "matched_symbols": list(self.matched_symbols),
             "safe_files": [_safe_candidate_dict(c) for c in self.safe_files],
             "blocked_files": [_safe_candidate_dict(c) for c in self.blocked_files],
             "findings": [
@@ -97,6 +105,7 @@ def _safe_candidate_dict(candidate: SafeContextCandidate) -> dict:
         "role": candidate.role,
         "estimated_tokens": candidate.estimated_tokens,
         "selection_reason": candidate.selection_reason,
+        "inclusion_reason": candidate.inclusion_reason,
         "decision": candidate.decision,
         "retrieval_rank": candidate.retrieval_rank,
         "retrieval_score": candidate.retrieval_score,

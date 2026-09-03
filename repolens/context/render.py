@@ -57,6 +57,8 @@ def _render_candidate(candidate) -> list[str]:
     lines: list[str] = []
     lines.append(f"### {candidate.path.as_posix()}")
     lines.append(f"Reason: {candidate.selection_reason}")
+    if candidate.inclusion_reason:
+        lines.append(f"Inclusion: {candidate.inclusion_reason}")
     lines.append(f"Estimated tokens: {candidate.estimated_tokens}")
     if candidate.retrieval_rank is not None:
         lines.append(f"Retrieval rank: {candidate.retrieval_rank}")

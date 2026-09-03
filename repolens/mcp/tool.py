@@ -184,6 +184,8 @@ def _build_response(safe: SafeContextPackage, result: FirewallResult, rendered: 
         "query": safe.query,
         "budget": {"max_tokens": safe.budget.max_tokens},
         "total_estimated_tokens": safe.total_estimated_tokens,
+        "intent": safe.intent,
+        "matched_symbols": list(safe.matched_symbols),
         "selected_files": [
             {
                 "path": c.path,
@@ -191,6 +193,7 @@ def _build_response(safe: SafeContextPackage, result: FirewallResult, rendered: 
                 "decision": c.decision,
                 "estimated_tokens": c.estimated_tokens,
                 "selection_reason": c.selection_reason,
+                "inclusion_reason": c.inclusion_reason,
             }
             for c in safe.safe_files
         ],

@@ -31,7 +31,17 @@ Public surface (kept small and composable):
 No agents, MCP, CLI, or server are part of this milestone.
 """
 
-from repolens.context.candidate import CandidateRole, ContextCandidate, ExcludedCandidate
+from repolens.context.candidate import (
+    INCLUSION_DEPENDENCY,
+    INCLUSION_DEPENDENT,
+    INCLUSION_HYBRID_MATCH,
+    INCLUSION_LEXICAL_MATCH,
+    INCLUSION_SEMANTIC_MATCH,
+    INCLUSION_SYMBOL_MATCH,
+    CandidateRole,
+    ContextCandidate,
+    ExcludedCandidate,
+)
 from repolens.context.config import (
     ContextBudget,
     DependencyExpansionConfig,
@@ -48,11 +58,18 @@ from repolens.context.firewall import (
     SafeContextPackage,
     Severity,
 )
+from repolens.context.intent import QueryIntent, classify_intent, extract_symbol_tokens
 from repolens.context.package import ContextPackage
 from repolens.context.render import render_context
 from repolens.context.tokens import estimate_tokens
 
 __all__ = [
+    "INCLUSION_DEPENDENCY",
+    "INCLUSION_DEPENDENT",
+    "INCLUSION_HYBRID_MATCH",
+    "INCLUSION_LEXICAL_MATCH",
+    "INCLUSION_SEMANTIC_MATCH",
+    "INCLUSION_SYMBOL_MATCH",
     "CandidateRole",
     "ContextBudget",
     "ContextCandidate",
@@ -65,10 +82,13 @@ __all__ = [
     "FirewallConfig",
     "FirewallDecision",
     "FirewallResult",
+    "QueryIntent",
     "RetrievalConfig",
     "SafeContextCandidate",
     "SafeContextPackage",
     "Severity",
+    "classify_intent",
     "estimate_tokens",
+    "extract_symbol_tokens",
     "render_context",
 ]

@@ -25,6 +25,8 @@ class ContextPackage:
     primary_candidates: tuple[ContextCandidate, ...] = ()
     dependency_candidates: tuple[ContextCandidate, ...] = ()
     excluded_candidates: tuple[ExcludedCandidate, ...] = ()
+    intent: str | None = None
+    matched_symbols: tuple[str, ...] = ()
 
     @property
     def total_estimated_tokens(self) -> int:
@@ -33,15 +35,21 @@ class ContextPackage:
 
     def to_dict(self) -> dict:
         """Return a JSON-serializable dict (paths as posix strings)."""
-        return {
+        data = {
             "query": self.query,
-            "budget": {"max_tokens": self.budget.max_tokens},
+            "budget": {
+                "max_tokens": self.budget.max_tokens,
+                "truncate_oversized": self.budget.truncate_oversized,
+            },
             "total_estimated_tokens": self.total_estimated_tokens,
+            "intent": self.intent,
+            "matched_symbols": list(self.matched_symbols),
             "selected_files": [_candidate_dict(c) for c in self.selected_files],
             "primary_candidates": [_candidate_dict(c) for c in self.primary_candidates],
             "dependency_candidates": [_candidate_dict(c) for c in self.dependency_candidates],
             "excluded_candidates": [_excluded_dict(c) for c in self.excluded_candidates],
         }
+        return data
 
     def to_json(self, **json_kwargs) -> str:
         """Return the package serialized as a JSON string."""
@@ -54,6 +62,7 @@ def _candidate_dict(candidate: ContextCandidate) -> dict:
         "role": candidate.role.value,
         "estimated_tokens": candidate.estimated_tokens,
         "selection_reason": candidate.selection_reason,
+        "inclusion_reason": candidate.inclusion_reason,
         "retrieval_rank": candidate.retrieval_rank,
         "retrieval_score": candidate.retrieval_score,
         "lexical_rank": candidate.lexical_rank,

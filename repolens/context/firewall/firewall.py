@@ -178,6 +178,7 @@ class ContextFirewall:
                         lexical_rank=candidate.lexical_rank,
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
+                        inclusion_reason=candidate.inclusion_reason,
                     )
                 )
             elif decision == "redact":
@@ -205,6 +206,7 @@ class ContextFirewall:
                         lexical_rank=candidate.lexical_rank,
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
+                        inclusion_reason=candidate.inclusion_reason,
                     )
                 )
             else:
@@ -221,6 +223,7 @@ class ContextFirewall:
                         lexical_rank=candidate.lexical_rank,
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
+                        inclusion_reason=candidate.inclusion_reason,
                     )
                 )
 
@@ -232,6 +235,8 @@ class ContextFirewall:
             findings=result.findings,
             firewall_enabled=True,
             policy_version=result.policy_version,
+            intent=package.intent,
+            matched_symbols=package.matched_symbols,
         )
 
     def is_safe(self, package: ContextPackage) -> bool:
@@ -302,6 +307,7 @@ class ContextFirewall:
                 lexical_rank=c.lexical_rank,
                 semantic_rank=c.semantic_rank,
                 graph_distance=c.graph_distance,
+                inclusion_reason=c.inclusion_reason,
             )
             for c in package.selected_files
         )
@@ -313,4 +319,6 @@ class ContextFirewall:
             findings=(),
             firewall_enabled=False,
             policy_version=self._config.policy_version,
+            intent=package.intent,
+            matched_symbols=package.matched_symbols,
         )

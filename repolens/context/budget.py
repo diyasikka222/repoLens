@@ -23,8 +23,14 @@ are returned with reason ``over_budget``.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from repolens.context.candidate import ContextCandidate, ExcludedCandidate
 from repolens.context.config import ContextBudget
+from repolens.context.tokens import estimate_tokens
+
+#: Rough characters per estimated token; mirrors :mod:`repolens.context.tokens`.
+_CHARS_PER_TOKEN = 4
 
 
 def select_within_budget(
@@ -36,6 +42,12 @@ def select_within_budget(
     Returns ``(selected, excluded)`` where ``selected`` is in the same order
     as ``ranked`` and ``excluded`` lists the candidates that did not fit, each
     with the reason it was dropped.
+
+    When ``budget.truncate_oversized`` is ``True``, a candidate larger than
+    the *remaining* budget is truncated to its head so it still fits and is
+    returned (with its source and estimated-token count recomputed) instead of
+    being excluded. When ``False`` (the default) an oversized candidate is
+    excluded exactly as before.
     """
     selected: list[ContextCandidate] = []
     excluded: list[ExcludedCandidate] = []
@@ -48,27 +60,40 @@ def select_within_budget(
             selected.append(candidate)
             continue
 
-        if tokens > remaining:
-            if remaining == budget.max_tokens:
-                # Nothing fits at all (candidate alone exceeds the whole budget).
-                excluded.append(
-                    ExcludedCandidate(
-                        path=candidate.path,
-                        estimated_tokens=tokens,
-                        reason="exceeds_total_budget",
-                    )
-                )
-            else:
-                excluded.append(
-                    ExcludedCandidate(
-                        path=candidate.path,
-                        estimated_tokens=tokens,
-                        reason="over_budget",
-                    )
-                )
+        if tokens <= remaining:
+            selected.append(candidate)
+            remaining -= tokens
             continue
 
-        selected.append(candidate)
-        remaining -= tokens
+        # Candidate does not fit in the remaining budget.
+        if budget.truncate_oversized and tokens > 0 and remaining > 0:
+            allowed_chars = remaining * _CHARS_PER_TOKEN
+            truncated_source = candidate.source[:allowed_chars]
+            truncated = replace(
+                candidate,
+                source=truncated_source,
+                estimated_tokens=estimate_tokens(truncated_source),
+            )
+            selected.append(truncated)
+            remaining -= truncated.estimated_tokens
+            continue
+
+        if remaining == budget.max_tokens:
+            # Nothing fits at all (candidate alone exceeds the whole budget).
+            excluded.append(
+                ExcludedCandidate(
+                    path=candidate.path,
+                    estimated_tokens=tokens,
+                    reason="exceeds_total_budget",
+                )
+            )
+        else:
+            excluded.append(
+                ExcludedCandidate(
+                    path=candidate.path,
+                    estimated_tokens=tokens,
+                    reason="over_budget",
+                )
+            )
 
     return selected, excluded

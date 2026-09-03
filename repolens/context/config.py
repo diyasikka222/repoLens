@@ -23,6 +23,8 @@ DEFAULT_RRF_K = 60
 
 DEFAULT_TOTAL_BUDGET = 8000
 DEFAULT_DEPTH = 1
+#: Cap on dependency-expanded files per build (``None`` = depth bound only).
+DEFAULT_MAX_EXPANDED = 12
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,9 @@ class DependencyExpansionConfig:
     depth: int = DEFAULT_DEPTH
     include_dependencies: bool = True
     include_dependents: bool = True
+    #: Maximum number of expanded (non-primary) files to keep per build.
+    #: ``None`` means only the ``depth`` bound applies.
+    max_expanded: int | None = DEFAULT_MAX_EXPANDED
 
 
 @dataclass(frozen=True)
@@ -131,6 +136,15 @@ class ContextBudget:
     ``max_tokens`` is an approximate budget in *estimated* tokens (see
     :mod:`repolens.context.tokens`). The engine never intentionally exceeds
     it. Set ``max_tokens=None`` for an unlimited budget.
+
+    ``truncate_oversized`` (default ``False``) controls how a single file
+    larger than the *remaining* budget is handled:
+
+    - ``False`` (default, backward-compatible) — the oversized file is
+      excluded with reason ``over_budget`` / ``exceeds_total_budget``.
+    - ``True`` — the file is kept but truncated to its head so it fits within
+      the remaining budget, rather than being dropped entirely.
     """
 
     max_tokens: Optional[int] = DEFAULT_TOTAL_BUDGET
+    truncate_oversized: bool = False
