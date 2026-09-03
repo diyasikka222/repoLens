@@ -1,10 +1,12 @@
 """Semantic code retrieval using pluggable embedding providers.
 
-:class:`SemanticSearcher` represents every Python file in a repository and
-the developer query as vectors (via an :class:`repolens.embeddings.EmbeddingProvider`)
-and ranks files by cosine similarity. It is an independent capability: it
-never touches the lexical ranking in :mod:`repolens.search`, and combining
-the two signals is deliberately left to a future hybrid milestone.
+:class:`SemanticSearcher` represents candidate Python files in a repository
+and the developer query as vectors (via an :class:`repolens.embeddings.EmbeddingProvider`)
+and reranks those candidates by cosine similarity. It is an independent
+capability: it never modifies the lexical ranking in :mod:`repolens.search`,
+combining the two signals is left to the hybrid retriever. To keep embedding
+cost bounded, the lexical :class:`~repolens.search.CodeSearcher` supplies the
+candidate set that semantic ranking operates over.
 
 Repository text representation
 ------------------------------
@@ -46,9 +48,10 @@ from pathlib import Path
 from repolens.embeddings import EmbeddingProvider, Vector
 from repolens.index import Symbol, SymbolIndexBuilder
 from repolens.parser import ModuleAnalysis, PythonParser
-from repolens.scanner import RepositoryScanner
+from repolens.search import CodeSearcher
 
 DEFAULT_LIMIT = 10
+DEFAULT_CANDIDATE_LIMIT = 40
 
 
 def cosine_similarity(first: Vector, second: Vector) -> float:
@@ -85,36 +88,65 @@ class SemanticSearcher:
         searcher = SemanticSearcher(repo_root, FakeEmbeddingProvider())
         results = searcher.search("refund a card payment", limit=10)
 
-    Construction scans, parses, and embeds every repository file once; each
-    :meth:`search` call embeds only the query.
+    Construction is cheap: it scans the repository and groups symbols, but
+    never embeds anything. The expensive work of composing documents and
+    running the embedding provider is deferred to :meth:`search`.
+
+    Semantic search is *candidate-based*: the existing lexical
+    :class:`~repolens.search.CodeSearcher` first retrieves a bounded set of
+    candidate files, and only those candidate documents are embedded and
+    reranked by cosine similarity. This keeps semantic retrieval fully
+    offline and on-device without ever embedding the entire repository on a
+    single query. Candidate embeddings are cached per file, so repeated or
+    overlapping queries reuse already-embedded documents instead of
+    re-embedding them.
     """
 
-    def __init__(self, root: Path | str, provider: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        root: Path | str,
+        provider: EmbeddingProvider,
+        *,
+        candidate_searcher: CodeSearcher | None = None,
+        candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
+    ) -> None:
         self.root = Path(root)
         self._provider = provider
         self._parser = PythonParser()
-        self._paths = RepositoryScanner(self.root).discover_python_files()
-        symbols_by_path = self._group_symbols_by_path()
-        documents = [
-            self._compose_document(path, *self._read_file(path), symbols_by_path.get(path, ()))
-            for path in self._paths
-        ]
-        self._vectors = provider.embed_texts(documents)
+        self._candidate_searcher = (
+            candidate_searcher if candidate_searcher is not None else CodeSearcher(self.root)
+        )
+        self._candidate_limit = candidate_limit
+        self._symbols_by_path = self._group_symbols_by_path()
+        self._vectors_by_path: dict[Path, Vector] = {}
 
     def search(
         self, query: str, limit: int = DEFAULT_LIMIT
     ) -> list[SemanticResult]:
         """Return up to ``limit`` files ranked by descending cosine similarity.
 
+        First retrieves a bounded candidate set with the lexical
+        :class:`~repolens.search.CodeSearcher`, embeds only those candidates
+        (cached for reuse), then reranks them by cosine similarity.
+
         An empty or whitespace-only query, a non-positive limit, or a query
-        with no positive similarity to any file yields an empty list.
+        whose lexical candidate set is empty yields an empty list.
         """
         if not query.strip() or limit <= 0:
             return []
+        candidate_paths = [
+            result.file_path
+            for result in self._candidate_searcher.search(
+                query, limit=self._candidate_limit
+            )
+        ]
+        self._ensure_embeddings(candidate_paths)
         query_vector = self._provider.embed_text(query)
+        if not candidate_paths:
+            return []
         scored = []
-        for path, vector in zip(self._paths, self._vectors):
-            similarity = cosine_similarity(query_vector, vector)
+        for path in candidate_paths:
+            similarity = cosine_similarity(query_vector, self._vectors_by_path[path])
             if similarity > 0.0:
                 scored.append((path, similarity))
         scored.sort(key=lambda item: (-item[1], item[0].as_posix()))
@@ -122,6 +154,28 @@ class SemanticSearcher:
             SemanticResult(file_path=path, similarity=similarity)
             for path, similarity in scored[:limit]
         ]
+
+    def _ensure_embeddings(self, candidate_paths: list[Path]) -> None:
+        """Embed the candidate documents that are not already cached.
+
+        Documents already embedded by an earlier query are reused; only the
+        newly-seen candidates are handed to the provider in one batch.
+        """
+        missing = [path for path in candidate_paths if path not in self._vectors_by_path]
+        if not missing:
+            return
+        documents = [
+            self._compose_document(
+                path,
+                *self._read_file(path),
+                self._symbols_by_path.get(path, ()),
+            )
+            for path in missing
+        ]
+        for path, vector in zip(
+            missing, self._provider.embed_texts(documents)
+        ):
+            self._vectors_by_path[path] = vector
 
     def _group_symbols_by_path(self) -> dict[Path, tuple[Symbol, ...]]:
         by_path: dict[Path, list[Symbol]] = defaultdict(list)

@@ -27,9 +27,11 @@ class RecordingProvider(FakeEmbeddingProvider):
         super().__init__()
         self.batched_documents: list[list[str]] = []
         self.embedded_queries: list[str] = []
+        self.total_documents_embedded = 0
 
     def embed_texts(self, texts):
         self.batched_documents.append(list(texts))
+        self.total_documents_embedded += len(texts)
         return super().embed_texts(texts)
 
     def embed_text(self, text):
@@ -56,20 +58,104 @@ def test_cosine_similarity_with_zero_vector_is_zero_not_error() -> None:
 # --- 6./7. Repository items and queries are embedded -------------------------------
 
 
-def test_repository_documents_are_embedded_at_construction(tmp_path: Path) -> None:
+def test_only_candidate_documents_are_embedded_on_first_search(tmp_path: Path) -> None:
     write_file(tmp_path, "payments/refund.py", "def refund_transaction():\n    pass\n")
     write_file(tmp_path, "users/create.py", "def create_user():\n    pass\n")
     provider = RecordingProvider()
 
     searcher = SemanticSearcher(tmp_path, provider)
+    searcher.search("refund payment")
 
     assert len(provider.batched_documents) == 1
     documents = provider.batched_documents[0]
-    assert len(documents) == 2
+    assert len(documents) == 1
     joined = "\n".join(documents)
     assert "path: payments/refund.py" in joined
     assert "refund_transaction" in joined
+    assert "create_user" not in joined
+    assert provider.embedded_queries == ["refund payment"]
+
+
+# --- Lazy, candidate-based initialization ------------------------------------
+
+
+def test_construction_does_not_embed_repository(tmp_path: Path) -> None:
+    write_file(tmp_path, "payments/refund.py", "def refund_transaction():\n    pass\n")
+    provider = RecordingProvider()
+
+    SemanticSearcher(tmp_path, provider)
+
+    assert provider.batched_documents == []
     assert provider.embedded_queries == []
+
+
+def test_first_search_triggers_initialization(tmp_path: Path) -> None:
+    write_file(tmp_path, "payments/refund.py", "def refund_transaction():\n    pass\n")
+    provider = RecordingProvider()
+    searcher = SemanticSearcher(tmp_path, provider)
+    assert provider.batched_documents == []
+
+    searcher.search("refund payment")
+
+    assert len(provider.batched_documents) == 1
+    assert provider.embedded_queries == ["refund payment"]
+
+
+def test_repeated_searches_reuse_cached_embeddings(tmp_path: Path) -> None:
+    write_file(tmp_path, "payments/refund.py", "def refund_transaction():\n    pass\n")
+    provider = RecordingProvider()
+    searcher = SemanticSearcher(tmp_path, provider)
+
+    first = searcher.search("refund payment")
+    second = searcher.search("refund payment")
+
+    assert len(provider.batched_documents) == 1
+    assert first == second
+    assert provider.embedded_queries == ["refund payment", "refund payment"]
+
+
+def test_overlapping_searches_reuse_cached_candidate_embeddings(
+    tmp_path: Path,
+) -> None:
+    write_file(tmp_path, "a.py", "# alpha shared\nx = 1\n")
+    write_file(tmp_path, "b.py", "# beta shared\ny = 2\n")
+    provider = RecordingProvider()
+    searcher = SemanticSearcher(tmp_path, provider)
+
+    searcher.search("alpha shared")
+    searcher.search("beta shared")
+
+    # Both files appear in both candidate sets due to "shared", but each file
+    # is embedded exactly once across the two searches.
+    assert provider.total_documents_embedded == 2
+    assert len(provider.batched_documents) >= 1
+    assert provider.embedded_queries == ["alpha shared", "beta shared"]
+
+
+def test_candidate_limit_is_respected(tmp_path: Path) -> None:
+    for number in range(12):
+        write_file(tmp_path, f"items/item_{number:02d}.py", f"# widget {number}\n")
+    provider = RecordingProvider()
+    searcher = SemanticSearcher(tmp_path, provider, candidate_limit=5)
+
+    results = searcher.search("widget")
+
+    assert len(provider.batched_documents) == 1
+    assert len(provider.batched_documents[0]) == 5
+    assert len(results) == 5
+
+
+def test_candidate_ranking_is_deterministic(tmp_path: Path) -> None:
+    write_file(tmp_path, "aa/tool.py", "# tool for cutting\nvalue = 1\n")
+    write_file(tmp_path, "bb/tool.py", "# tool for cutting\nvalue = 1\n")
+    provider = RecordingProvider()
+    searcher = SemanticSearcher(tmp_path, provider, candidate_limit=10)
+
+    first = searcher.search("cutting tool", limit=5)
+    second = searcher.search("cutting tool", limit=5)
+
+    assert first == second
+    assert len(provider.batched_documents) == 1
 
 
 def test_query_is_embedded_on_each_search(tmp_path: Path) -> None:

@@ -57,9 +57,14 @@ class RetrievalConfig:
                 from repolens.embeddings import FakeEmbeddingProvider
 
                 embedding_provider = FakeEmbeddingProvider()
+            from repolens.search import CodeSearcher
             from repolens.semantic_search import SemanticSearcher
 
-            return SemanticSearcher(root_path, embedding_provider)
+            return SemanticSearcher(
+                root_path,
+                embedding_provider,
+                candidate_searcher=CodeSearcher(root_path),
+            )
         if self.strategy in ("rrf", "weighted"):
             from repolens.retrieval import FusionStrategy, HybridSearcher
             from repolens.search import CodeSearcher
@@ -70,7 +75,11 @@ class RetrievalConfig:
 
                 embedding_provider = FakeEmbeddingProvider()
             lexical = CodeSearcher(root_path)
-            semantic = SemanticSearcher(root_path, embedding_provider)
+            semantic = SemanticSearcher(
+                root_path,
+                embedding_provider,
+                candidate_searcher=lexical,
+            )
             strategy = (
                 FusionStrategy.RRF if self.strategy == "rrf" else FusionStrategy.WEIGHTED
             )
