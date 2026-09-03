@@ -63,6 +63,12 @@ DEFAULT_LEXICAL_WEIGHT = 0.5
 DEFAULT_SEMANTIC_WEIGHT = 0.5
 DEFAULT_RRF_K = 60
 
+# Fallback pool size for weighted fusion when the semantic searcher does not
+# expose a candidate limit. The pool must be larger than any realistic result
+# cap so that min-max normalisation is computed over a stable set and the
+# ranking does not shift when a caller asks for fewer results.
+DEFAULT_SCORE_POOL_SIZE = 1000
+
 
 class FusionStrategy(Enum):
     """Available hybrid fusion strategies."""
@@ -219,16 +225,35 @@ class HybridSearcher:
 
         An empty or whitespace-only query, a non-positive limit, or
         repository with no matches yields an empty list.
+
+        The hybrid ranking is computed over a stable candidate pool (the
+        semantic searcher's candidate limit) so that requesting a smaller
+        ``limit`` never changes which file ranks first. Each retriever is
+        asked for the pool in full, the fusion scores are computed over it,
+        and only the final ranked list is truncated to ``limit``.
         """
         if not query.strip() or limit <= 0:
             return []
 
-        lexical_results = self._lexical.search(query, limit=limit)
-        semantic_results = self._semantic.search(query, limit=limit)
+        pool_size = self._semantic_pool_size()
+        lexical_results = self._lexical.search(query, limit=pool_size)
+        semantic_results = self._semantic.search(query, limit=pool_size)
 
         if self._strategy == FusionStrategy.RRF:
             return self._search_rrf(lexical_results, semantic_results, limit)
         return self._search_weighted(lexical_results, semantic_results, limit)
+
+    def _semantic_pool_size(self) -> int:
+        """Return the stable candidate pool size for fusion.
+
+        Uses the semantic searcher's own candidate limit when available (this
+        is the frame its embeddings are computed over), falling back to a
+        large fixed constant so normalisation is never truncated by ``limit``.
+        """
+        limit = getattr(self._semantic, "_candidate_limit", None)
+        if limit is None or limit < 1:
+            return DEFAULT_SCORE_POOL_SIZE
+        return limit
 
     # -- weighted strategy ---------------------------------------------------
 

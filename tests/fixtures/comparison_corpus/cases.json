@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Comparison corpus ground truth for retrieval-strategy benchmarking.",
+    "Each target file uses identifiers that do NOT carry the query vocabulary",
+    "so lexical search weights those files low (source-token weight 1) while",
+    "semantic search picks up the same intent from dense docstring prose.",
+    "",
+    "'where do we validate user credentials' intentionally trips lexical: the",
+    "core/misnamed.py module names functions check_credentials/check_user, so",
+    "lexical ranks it first even though it only computes parity bits. Semantic",
+    "recovers auth/identity.py."
+  ],
+  "cases": [
+    {
+      "query": "where do we validate user credentials",
+      "relevant_files": ["auth/identity.py"]
+    },
+    {
+      "query": "check user login credentials",
+      "relevant_files": ["auth/identity.py"]
+    },
+    {
+      "query": "retry a failed network operation with backoff",
+      "relevant_files": ["net/retry.py"]
+    },
+    {
+      "query": "scan for source files in the repository",
+      "relevant_files": ["core/discovery.py"]
+    },
+    {
+      "query": "renew a customer subscription",
+      "relevant_files": ["auth/subscriptions.py"]
+    }
+  ]
+}

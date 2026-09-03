@@ -219,6 +219,34 @@ class TestWeightedHybrid:
         assert len(searcher.search("widget", limit=100)) == 15
         assert len(searcher.search("widget", limit=0)) == 0
 
+    def test_ranking_is_independent_of_requested_limit(self, tmp_path: Path) -> None:
+        # A high-symbol-score "magnet" that should beat a semantically relevant
+        # body at any result count. If min-max normalisation were computed over
+        # the caller's truncated `limit` slice, asking for 1 result would change
+        # which file ranks first. The ranking must not depend on the limit.
+        write_file(tmp_path, "core/magnet.py", "def check_credentials():\n    return 0\n")
+        write_file(
+            tmp_path,
+            "auth/identity.py",
+            "def verify_identity():\n    # validate user credentials here\n    return True\n",
+        )
+        for i in range(12):
+            write_file(tmp_path, f"filler/f{i:02d}.py", f"# widget {i}\n")
+        root = Path(tmp_path)
+        searcher = HybridSearcher(
+            root,
+            lexical_searcher=CodeSearcher(root),
+            semantic_searcher=SemanticSearcher(
+                root, FakeEmbeddingProvider(), candidate_limit=40
+            ),
+        )
+        top_at_one = searcher.search("validate user credentials", limit=1)
+        top_at_full = searcher.search("validate user credentials", limit=20)
+        assert len(top_at_one) == 1
+        assert len(top_at_full) > 1
+        expected_top = top_at_full[0].file_path
+        assert top_at_one[0].file_path == expected_top
+
     def test_score_is_weighted_average(self, tmp_path: Path) -> None:
         write_file(tmp_path, "a.py", "def refund():\n    pass\n")
         write_file(tmp_path, "b.py", "# unrelated\nvalue = 1\n")
