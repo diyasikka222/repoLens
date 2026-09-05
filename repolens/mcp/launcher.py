@@ -23,6 +23,7 @@ from repolens.mcp.deps import (
     build_engine,
     build_firewall,
     resolve_embedding_provider,
+    validate_repository_root,
 )
 from repolens.mcp.errors import ConfigurationError, McpError
 from repolens.mcp.server import build_mcp_server
@@ -139,6 +140,31 @@ def _resolve_root_for_factory(root, embedding_provider):
     return validate_repository_root(root)
 
 
+def make_impact_analyzer_factory(root) -> Callable[..., "ImpactAnalyzer"]:
+    """Return a factory that lazily builds and caches an :class:`ImpactAnalyzer`.
+
+    The root is validated eagerly (fail fast at startup); the analyzer — and
+    therefore the repository index — is built on the first invocation, keeping
+    MCP startup fast and initialization lazy.
+    """
+    from repolens.impact import ImpactAnalyzer
+    from repolens.mcp.deps import build_impact_analyzer
+
+    root = validate_repository_root(root)
+
+    lock = threading.Lock()
+    cache: list[ImpactAnalyzer | None] = [None]
+
+    def factory(**kwargs) -> ImpactAnalyzer:
+        if cache[0] is None:
+            with lock:
+                if cache[0] is None:
+                    cache[0] = build_impact_analyzer(root)
+        return cache[0]
+
+    return factory
+
+
 def run(argv: list[str] | None = None) -> None:
     """Run the MCP server to completion (blocks on the stdio loop)."""
     args = _parse_args(argv)
@@ -164,12 +190,15 @@ def run(argv: list[str] | None = None) -> None:
             default_max_tokens=args.default_max_tokens,
             default_dependency_depth=args.default_dependency_depth,
         )
+        impact_factory = make_impact_analyzer_factory(args.repo)
     except McpError as exc:
         _fatal(exc)
         return
 
     firewall = build_firewall()
-    server = build_mcp_server(engine_factory, firewall)
+    server = build_mcp_server(
+        engine_factory, firewall, impact_factory=impact_factory
+    )
 
     try:
         asyncio.run(server.run_stdio_async())

@@ -42,6 +42,10 @@ class ContextEngineError(McpError):
     """Building a context package failed."""
 
 
+class ImpactAnalysisError(McpError):
+    """Running an impact analysis failed."""
+
+
 class FirewallError(McpError):
     """The context firewall failed during inspection."""
 

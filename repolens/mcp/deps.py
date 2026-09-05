@@ -131,6 +131,29 @@ def build_engine(
     return engine
 
 
+def build_impact_analyzer(root: str | Path):
+    """Build a lazy-free :class:`ImpactAnalyzer` for ``root``.
+
+    Shares the same persistent incremental index as :func:`build_engine`, so a
+    warm analyzer (built after the engine) performs no re-parsing.
+    """
+    from repolens.impact import ImpactAnalyzer
+
+    root_path = validate_repository_root(root)
+    try:
+        index = _build_index(root_path)
+        return ImpactAnalyzer(root_path, index=index)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigurationError(
+            "Could not initialize impact analysis for the configured "
+            "repository.",
+            diagnostic=(
+                f"ImpactAnalyzer init failed for {root_path}: "
+                f"{type(exc).__name__}"
+            ),
+        ) from exc
+
+
 def build_firewall(firewall_config: FirewallConfig | None = None) -> ContextFirewall:
     """Build a :class:`ContextFirewall` with the given (or default) policy."""
     return ContextFirewall(firewall_config)

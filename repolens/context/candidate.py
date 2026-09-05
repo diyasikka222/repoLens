@@ -39,6 +39,12 @@ INCLUSION_HYBRID_MATCH = "hybrid_match"
 INCLUSION_DEPENDENCY = "dependency"
 INCLUSION_DEPENDENT = "dependent"
 
+#: Impact-driven inclusion categories (Milestone 21). These are additive:
+#: existing categories and behaviour are unchanged.
+INCLUSION_TEST = "test"
+INCLUSION_API_CONSUMER = "api_consumer"
+INCLUSION_CONFIGURATION = "configuration"
+
 
 @dataclass(frozen=True)
 class ContextCandidate:

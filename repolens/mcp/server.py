@@ -22,6 +22,11 @@ from mcp import types
 
 from repolens.context import ContextFirewall
 from repolens.mcp.errors import McpError
+from repolens.mcp.impact_tool import (
+    ImpactFactory,
+    parse_impact_arguments,
+    run_analyze_impact,
+)
 from repolens.mcp.tool import EngineFactory, parse_arguments, run_get_context
 
 logger = logging.getLogger("repolens.mcp")
@@ -30,6 +35,7 @@ SERVER_NAME = "repolens"
 SERVER_VERSION = "0.1.0"
 
 TOOL_NAME = "get_context"
+IMPACT_TOOL_NAME = "analyze_impact"
 
 TOOL_DESCRIPTION = (
     "Search the repository and return a safe context package for the given "
@@ -42,20 +48,40 @@ TOOL_DESCRIPTION = (
     "decisions, and rendered safe context."
 )
 
+IMPACT_TOOL_DESCRIPTION = (
+    "Analyze the blast radius of changing a repository target. Accepts a file "
+    "path, a dotted module, a symbol name, or 'path/to/file.py::symbol'.\n\n"
+    "Returns structured output: the resolved target, a deterministic risk "
+    "classification (low/medium/high), a summary of affected files grouped by "
+    "relationship (direct_dependency, indirect_dependency, reverse_dependency, "
+    "test, configuration, api_consumer), and the list of impacted files with "
+    "the reason and evidence for each. Reverse traversal is bounded by "
+    "max_depth (default 4) and is never unbounded. Ambiguous or unknown "
+    "targets are rejected with a safe message.\n\n"
+    "This is NOT a full language-server call graph: symbol-level findings are "
+    "conservative import/naming evidence, clearly separated from module "
+    "dependency edges."
+)
+
 
 def build_mcp_server(
     engine_factory: EngineFactory,
     firewall: ContextFirewall,
     *,
+    impact_factory: ImpactFactory | None = None,
     server_name: str = SERVER_NAME,
     server_version: str = SERVER_VERSION,
 ) -> MCPServer:
-    """Build and configure an :class:`MCPServer` exposing ``get_context``.
+    """Build and configure an :class:`MCPServer` exposing tools.
 
     Args:
         engine_factory: A callable ``(max_tokens=..., dependency_depth=...)``
             that returns a configured :class:`ContextEngine`.
         firewall: A :class:`ContextFirewall` used to guarantee safe output.
+        impact_factory: Optional callable returning an
+            :class:`repolens.impact.ImpactAnalyzer`; when provided, the
+            ``analyze_impact`` tool is registered alongside ``get_context``
+            (which is unchanged and always registered).
         server_name: MCP server name.
         server_version: MCP server version.
     """
@@ -103,6 +129,49 @@ def build_mcp_server(
         name=TOOL_NAME,
         description=TOOL_DESCRIPTION,
     )
+
+    if impact_factory is not None:
+        def analyze_impact(
+            target: str,
+            max_depth: int | None = None,
+            limit: int | None = None,
+        ) -> types.CallToolResult:
+            try:
+                parsed = parse_impact_arguments(
+                    {"target": target, "max_depth": max_depth, "limit": limit}
+                )
+            except McpError as exc:
+                _log_diagnostic(exc)
+                return _error_result(exc.safe_message)
+
+            try:
+                response = run_analyze_impact(
+                    impact_factory,
+                    parsed["target"],
+                    max_depth=parsed["max_depth"],
+                    limit=parsed["limit"],
+                )
+            except McpError as exc:
+                _log_diagnostic(exc)
+                return _error_result(exc.safe_message)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Unexpected failure in analyze_impact: %s",
+                    type(exc).__name__,
+                )
+                return _error_result(
+                    "An unexpected internal error occurred while analyzing "
+                    "impact."
+                )
+
+            return response
+
+        server.add_tool(
+            analyze_impact,
+            name=IMPACT_TOOL_NAME,
+            description=IMPACT_TOOL_DESCRIPTION,
+        )
+
     return server
 
 

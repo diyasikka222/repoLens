@@ -24,12 +24,15 @@ from pathlib import Path
 from repolens import diagnostics
 from repolens.context.budget import select_within_budget
 from repolens.context.candidate import (
+    INCLUSION_API_CONSUMER,
+    INCLUSION_CONFIGURATION,
     INCLUSION_DEPENDENCY,
     INCLUSION_DEPENDENT,
     INCLUSION_HYBRID_MATCH,
     INCLUSION_LEXICAL_MATCH,
     INCLUSION_SEMANTIC_MATCH,
     INCLUSION_SYMBOL_MATCH,
+    INCLUSION_TEST,
     CandidateRole,
     ContextCandidate,
     ExcludedCandidate,
@@ -101,6 +104,9 @@ class ContextEngine:
 
         self._dep_config = dependency if dependency is not None else DependencyExpansionConfig()
         self._budget = budget if budget is not None else ContextBudget()
+        # Keep the incremental snapshot so the impact analysis (Milestone 21)
+        # can reuse analyses instead of re-parsing the repository.
+        self._index = index
         self._graph = DependencyGraphBuilder(self.root, index=index).build()
         # Re-use the existing symbol index (from the incremental snapshot when
         # available, otherwise by scanning) — never a second symbol system.
@@ -179,6 +185,159 @@ class ContextEngine:
         from repolens.context.render import render_context
 
         return render_context(package)
+
+    # -- change-aware impact context (Milestone 21) --------------------------
+
+    def build_impact_context(
+        self,
+        target: str,
+        *,
+        max_depth: int | None = None,
+        budget: ContextBudget | None = None,
+    ) -> ContextPackage:
+        """Build a change-aware context package for ``target``.
+
+        The package prioritizes, in order: the changed target itself, direct
+        dependents, linked tests, indirect dependents, then configuration/API
+        consumers — all subject to ``budget`` (the engine's budget by default).
+        Deterministic; never a ``get_context`` behavior change.
+        """
+        from repolens.impact import (
+            ImpactAnalyzer,
+            ImpactConfig,
+            Relationship,
+            RiskLevel,
+        )
+
+        config = (
+            ImpactConfig(max_depth=max_depth)
+            if max_depth is not None
+            else ImpactConfig()
+        )
+        analyzer = ImpactAnalyzer(
+            self.root,
+            index=self._index,
+            graph=self._graph,
+            symbol_index=self._symbol_index,
+            config=config,
+        )
+        result = analyzer.analyze(target)
+        return self._package_impact(result, budget)
+
+    def build_change_context(self, query: str) -> ContextPackage:
+        """Build impact-aware context from a change question (``query``).
+
+        A deterministic symbol is extracted from the query; when none is found
+        an :class:`repolens.impact.ImpactTargetError` is raised rather than
+        silently returning a generic package.
+        """
+        from repolens.context.budget import select_within_budget
+        from repolens.impact import ImpactAnalyzer, ImpactConfig, ImpactTargetError
+
+        matches = match_symbols(
+            query, self.root, index=None, symbol_index=self._symbol_index
+        )
+        if not matches:
+            raise ImpactTargetError(
+                "No likely impact target could be determined from the query."
+            )
+        match = matches[0]
+        analyzer = ImpactAnalyzer(
+            self.root,
+            index=self._index,
+            graph=self._graph,
+            symbol_index=self._symbol_index,
+            config=ImpactConfig(),
+        )
+        result = analyzer.analyze(f"{match.path.as_posix()}::{match.symbol.name}")
+        return self._package_impact(result, None)
+
+    def _package_impact(self, result, budget: ContextBudget | None) -> ContextPackage:
+        """Turn an :class:`ImpactResult` into a prioritized context package."""
+        from repolens.context.budget import select_within_budget
+        from repolens.impact import Relationship, RiskLevel
+        from repolens.impact import TargetKind
+
+        effective_budget = budget if budget is not None else self._budget
+        ordered = self._impact_candidates(result)
+        selected, excluded = select_within_budget(ordered, effective_budget)
+
+        return ContextPackage(
+            query=result.target,
+            budget=effective_budget,
+            selected_files=tuple(selected),
+            primary_candidates=tuple(
+                c for c in selected if c.role is CandidateRole.PRIMARY
+            ),
+            dependency_candidates=tuple(
+                c for c in selected if c.role is not CandidateRole.PRIMARY
+            ),
+            excluded_candidates=tuple(excluded),
+            intent="impact",
+            matched_symbols=(result.symbol,) if result.symbol else (),
+        )
+
+    def _impact_candidates(self, result):
+        """Map an impact result to prioritized :class:`ContextCandidate` objects.
+
+        Ordering is fixed: changed target, direct dependents (nearest first),
+        tests, indirect dependents (nearest first), then API consumers,
+        configuration, and finally reverse dependencies. Tie-breaks are
+        repository-relative paths, so the order is deterministic.
+        """
+        from repolens.impact import Relationship, TargetKind
+
+        symbol = result.symbol
+        candidates: list[ContextCandidate] = []
+
+        def add(path, *, role, inclusion, reason, distance=None):
+            source = self._read_source(path)
+            candidates.append(
+                ContextCandidate(
+                    path=path,
+                    source=source,
+                    role=role,
+                    estimated_tokens=estimate_tokens(source),
+                    selection_reason=reason,
+                    inclusion_reason=inclusion,
+                    graph_distance=distance,
+                )
+            )
+
+        # 1. The changed target itself.
+        if result.target_path is not None:
+            add(
+                result.target_path,
+                role=CandidateRole.PRIMARY,
+                inclusion=INCLUSION_SYMBOL_MATCH,
+                reason=(
+                    f"changed target: {result.target}"
+                    + (f" (symbol {symbol})" if symbol else "")
+                ),
+            )
+
+        buckets = {
+            Relationship.DIRECT_DEPENDENCY: (INCLUSION_DEPENDENT, CandidateRole.DEPENDENT),
+            Relationship.TEST: (INCLUSION_TEST, CandidateRole.PRIMARY),
+            Relationship.INDIRECT_DEPENDENCY: (INCLUSION_DEPENDENT, CandidateRole.DEPENDENT),
+            Relationship.API_CONSUMER: (INCLUSION_API_CONSUMER, CandidateRole.PRIMARY),
+            Relationship.CONFIGURATION: (INCLUSION_CONFIGURATION, CandidateRole.PRIMARY),
+            Relationship.REVERSE_DEPENDENCY: (INCLUSION_DEPENDENCY, CandidateRole.DEPENDENCY),
+        }
+        for relationship, (inclusion, role) in buckets.items():
+            items = [
+                item for item in result.items if item.relationship is relationship
+            ]
+            items.sort(key=lambda item: (item.depth, item.path.as_posix()))
+            for item in items:
+                add(
+                    item.path,
+                    role=role,
+                    inclusion=inclusion,
+                    reason=item.reason,
+                    distance=item.depth or None,
+                )
+        return candidates
 
     # -- candidate construction ---------------------------------------------
 
