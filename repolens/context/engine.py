@@ -18,8 +18,10 @@ retrieval. A searcher may be injected directly, or built on demand from a
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+from repolens import diagnostics
 from repolens.context.budget import select_within_budget
 from repolens.context.candidate import (
     INCLUSION_DEPENDENCY,
@@ -106,6 +108,7 @@ class ContextEngine:
 
     def build_context(self, query: str) -> ContextPackage:
         """Compute a context package for ``query``."""
+        start = time.perf_counter()
         intent = classify_intent(query)
         symbol_matches = match_symbols(
             query, self.root, index=None, symbol_index=self._symbol_index
@@ -148,7 +151,7 @@ class ContextEngine:
         ranked = rank_candidates(all_candidates)
         selected, excluded = select_within_budget(ranked, self._budget)
 
-        return ContextPackage(
+        package = ContextPackage(
             query=query,
             budget=self._budget,
             selected_files=tuple(selected),
@@ -158,6 +161,18 @@ class ContextEngine:
             intent=intent,
             matched_symbols=tuple(s.symbol.name for s in symbol_matches),
         )
+        if diagnostics.enabled():
+            diagnostics.record(
+                "context_build",
+                repository=str(self.root),
+                elapsed_ms=round((time.perf_counter() - start) * 1000.0, 3),
+                candidates=len(all_candidates),
+                selected=len(package.selected_files),
+                context_size=package.total_estimated_tokens,
+                budget=self._budget.max_tokens,
+                intent=intent.value,
+            )
+        return package
 
     def render(self, package: ContextPackage) -> str:
         """Render ``package`` to deterministic text for an agent."""

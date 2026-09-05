@@ -32,6 +32,7 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+from repolens.atomic_write import atomic_write_text, sweep_stale_partials
 from repolens.embeddings import Vector
 
 logger = logging.getLogger("repolens.embedding_cache")
@@ -143,6 +144,11 @@ class FileSystemEmbeddingCache:
     deletions and invalidation cheap and avoids reading a large index blob for
     a single lookup.
 
+    Writes are atomic (temporary file + flush + :func:`os.replace`), so an
+    interrupted process never leaves a half-written entry behind; the worst
+    case is a stale ``.part-*.tmp`` sibling that readers ignore and
+    :meth:`clear` sweeps.
+
     Reads fail gracefully: a missing file, a file that fails to decode, or an
     entry with a mismatched identity triple is treated as a cache miss and a
     debug log line is emitted — never an exception.
@@ -207,19 +213,22 @@ class FileSystemEmbeddingCache:
         }
         entry = self._entry_path(path, content_identity, embedding_identity)
         try:
-            entry.write_text(
-                json.dumps(payload), encoding="utf-8"
-            )
+            atomic_write_text(entry, json.dumps(payload))
         except OSError:
             logger.warning("failed to persist cache entry %s", entry.name)
 
     def clear(self) -> None:
-        """Delete all cache entries under this cache's directory."""
+        """Delete all cache entries (and any stale partial writes) under this
+        cache's directory."""
         for entry in self._directory.glob("*.json"):
             try:
                 entry.unlink()
             except OSError:
                 logger.warning("failed to delete cache entry %s", entry.name)
+        try:
+            sweep_stale_partials(self._directory)
+        except OSError:
+            logger.warning("failed to sweep stale partials in %s", self._directory)
 
 
 def make_repo_cache(

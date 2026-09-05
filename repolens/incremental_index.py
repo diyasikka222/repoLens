@@ -30,9 +30,12 @@ import hashlib
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from repolens.atomic_write import atomic_write_text, sweep_stale_partials
+from repolens import diagnostics
 from repolens.embedding_cache import repository_identity
 from repolens.index import Symbol, SymbolIndexBuilder, SymbolKind
 from repolens.parser import Argument, Class, FromImport, Function, Import, Method, ModuleAnalysis, PythonParser
@@ -223,6 +226,10 @@ class AnalysisCache:
     content_hash, schema_version)``. The stored payload records the content
     hash and schema version so an incompatible or tampered entry is ignored
     as a miss.
+
+    Writes are atomic (temporary file + flush + :func:`os.replace`), so an
+    interrupted build never leaves a half-written entry; a stale
+    ``.part-*.tmp`` sibling is ignored by readers and swept by :meth:`clear`.
     """
 
     def __init__(self, directory: Path, *, persist: bool = True) -> None:
@@ -283,7 +290,7 @@ class AnalysisCache:
         }
         entry = self._entry_path(path, hash_)
         try:
-            entry.write_text(json.dumps(payload), encoding="utf-8")
+            atomic_write_text(entry, json.dumps(payload))
         except OSError:
             logger.warning("failed to persist index cache entry %s", entry.name)
 
@@ -296,6 +303,10 @@ class AnalysisCache:
                 entry.unlink()
             except OSError:
                 logger.warning("failed to delete index cache entry %s", entry.name)
+        try:
+            sweep_stale_partials(self._directory)
+        except OSError:
+            logger.warning("failed to sweep stale partials in %s", self._directory)
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +348,7 @@ class IncrementalIndexBuilder:
 
     def build(self) -> RepositoryIndex:
         """Scan and incrementally parse the repository into a snapshot."""
+        start = time.perf_counter()
         files = self._scanner.discover_python_files()
         discovered = len(files)
         parsed = 0
@@ -375,6 +387,17 @@ class IncrementalIndexBuilder:
             cache_misses=cache_misses,
             files_removed=files_removed,
         )
+        if diagnostics.enabled():
+            diagnostics.record(
+                "index_build",
+                repository=str(self.root),
+                elapsed_ms=round((time.perf_counter() - start) * 1000.0, 3),
+                files_discovered=discovered,
+                files_parsed=parsed,
+                cache_hits=cache_hits,
+                cache_misses=cache_misses,
+                files_removed=files_removed,
+            )
         return RepositoryIndex(
             root=self.root,
             files=tuple(files),
