@@ -6,4 +6,7 @@
 # Living here (instead of inside the fixture) keeps the fixture directory off
 # pytest's sys.path, so it can never shadow the repository's own ``tests``
 # package during collection.
-collect_ignore = ["architecture_retrieval_repository/tests"]
+collect_ignore = [
+    "architecture_retrieval_repository/tests",
+    "change_plan_repository/tests",
+]
