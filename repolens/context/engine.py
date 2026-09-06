@@ -84,6 +84,7 @@ class ContextEngine:
         budget: ContextBudget | None = None,
         embedding_provider=None,
         index: object | None = None,
+        reference_graph: object | None = None,
         primary_limit: int = DEFAULT_PRIMARY_LIMIT,
     ) -> None:
         self.root = Path(root)
@@ -111,6 +112,9 @@ class ContextEngine:
         # Re-use the existing symbol index (from the incremental snapshot when
         # available, otherwise by scanning) — never a second symbol system.
         self._symbol_index = SymbolIndexBuilder(self.root, index=index).build()
+        # Optional M22 static call graph: when present, change-aware contexts
+        # also surface statically resolved callers/callees of the target symbol.
+        self._reference_graph = reference_graph
 
     def build_context(self, query: str) -> ContextPackage:
         """Compute a context package for ``query``."""
@@ -219,6 +223,7 @@ class ContextEngine:
             index=self._index,
             graph=self._graph,
             symbol_index=self._symbol_index,
+            reference_graph=self._reference_graph,
             config=config,
         )
         result = analyzer.analyze(target)
@@ -247,6 +252,7 @@ class ContextEngine:
             index=self._index,
             graph=self._graph,
             symbol_index=self._symbol_index,
+            reference_graph=self._reference_graph,
             config=ImpactConfig(),
         )
         result = analyzer.analyze(f"{match.path.as_posix()}::{match.symbol.name}")
@@ -280,10 +286,11 @@ class ContextEngine:
     def _impact_candidates(self, result):
         """Map an impact result to prioritized :class:`ContextCandidate` objects.
 
-        Ordering is fixed: changed target, direct dependents (nearest first),
-        tests, indirect dependents (nearest first), then API consumers,
-        configuration, and finally reverse dependencies. Tie-breaks are
-        repository-relative paths, so the order is deterministic.
+        Ordering is fixed: changed target, direct callers, direct callees,
+        direct dependents, tests, indirect callers, indirect callees, indirect
+        dependents, then API consumers, configuration, and finally reverse
+        dependencies. Tie-breaks are repository-relative paths, so the order is
+        deterministic.
         """
         from repolens.impact import Relationship, TargetKind
 
@@ -317,8 +324,12 @@ class ContextEngine:
             )
 
         buckets = {
+            Relationship.DIRECT_CALLER: (INCLUSION_DEPENDENT, CandidateRole.PRIMARY),
+            Relationship.DIRECT_CALLEE: (INCLUSION_DEPENDENCY, CandidateRole.DEPENDENCY),
             Relationship.DIRECT_DEPENDENCY: (INCLUSION_DEPENDENT, CandidateRole.DEPENDENT),
             Relationship.TEST: (INCLUSION_TEST, CandidateRole.PRIMARY),
+            Relationship.INDIRECT_CALLER: (INCLUSION_DEPENDENT, CandidateRole.DEPENDENT),
+            Relationship.INDIRECT_CALLEE: (INCLUSION_DEPENDENCY, CandidateRole.DEPENDENCY),
             Relationship.INDIRECT_DEPENDENCY: (INCLUSION_DEPENDENT, CandidateRole.DEPENDENT),
             Relationship.API_CONSUMER: (INCLUSION_API_CONSUMER, CandidateRole.PRIMARY),
             Relationship.CONFIGURATION: (INCLUSION_CONFIGURATION, CandidateRole.PRIMARY),

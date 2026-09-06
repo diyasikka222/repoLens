@@ -135,14 +135,19 @@ def build_impact_analyzer(root: str | Path):
     """Build a lazy-free :class:`ImpactAnalyzer` for ``root``.
 
     Shares the same persistent incremental index as :func:`build_engine`, so a
-    warm analyzer (built after the engine) performs no re-parsing.
+    warm analyzer (built after the engine) performs no re-parsing.  Also builds
+    the M22 reference graph and wires it into the analyzer so symbol targets
+    gain statically resolved callers/callees relationships.
     """
     from repolens.impact import ImpactAnalyzer
 
     root_path = validate_repository_root(root)
     try:
         index = _build_index(root_path)
-        return ImpactAnalyzer(root_path, index=index)
+        reference_graph = _build_call_graph(root_path, index=index)
+        return ImpactAnalyzer(
+            root_path, index=index, reference_graph=reference_graph
+        )
     except Exception as exc:  # noqa: BLE001
         raise ConfigurationError(
             "Could not initialize impact analysis for the configured "
@@ -152,6 +157,48 @@ def build_impact_analyzer(root: str | Path):
                 f"{type(exc).__name__}"
             ),
         ) from exc
+
+
+def build_reference_graph(root: str | Path):
+    """Build the M22 :class:`CallGraph` for ``root``.
+
+    Shares the same persistent incremental index as
+    :func:`build_impact_analyzer`, so a graph built after the analyzer (or the
+    engine) performs no re-parsing of the sources.
+    """
+    root_path = validate_repository_root(root)
+    try:
+        index = _build_index(root_path)
+        return _build_call_graph(root_path, index=index)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigurationError(
+            "Could not initialize the call graph for the configured "
+            "repository.",
+            diagnostic=(
+                f"CallGraph init failed for {root_path}: "
+                f"{type(exc).__name__}"
+            ),
+        ) from exc
+
+
+def _build_call_graph(root_path: Path, index):
+    """Build the M22 call graph from the shared incremental index.
+
+    The reference and symbol indexes are derived from the shared index, so the
+    whole build is warm (cached) once the index exists.
+    """
+    from repolens.call_graph import CallGraphBuilder
+    from repolens.index import SymbolIndexBuilder
+    from repolens.references import ReferenceIndexBuilder
+
+    ref_index = ReferenceIndexBuilder(root_path, index=index).build()
+    sym_index = SymbolIndexBuilder(root_path, index=index).build()
+    return CallGraphBuilder(
+        root_path,
+        index=index,
+        reference_index=ref_index,
+        symbol_index=sym_index,
+    ).build()
 
 
 def build_firewall(firewall_config: FirewallConfig | None = None) -> ContextFirewall:

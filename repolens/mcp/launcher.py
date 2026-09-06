@@ -165,6 +165,33 @@ def make_impact_analyzer_factory(root) -> Callable[..., "ImpactAnalyzer"]:
     return factory
 
 
+def make_inspect_factory(root) -> Callable[..., "CallGraph"]:
+    """Return a factory that lazily builds and caches the M22 call graph.
+
+    The root is validated eagerly (fail fast at startup); the graph — and
+    therefore the repository index — is built on the first invocation, keeping
+    MCP startup fast and initialization lazy. The build shares the persistent
+    index with :func:`make_impact_analyzer_factory`, so a graph built after an
+    analyzer performs no re-parsing.
+    """
+    from repolens.call_graph import CallGraph
+    from repolens.mcp.deps import build_reference_graph
+
+    root = validate_repository_root(root)
+
+    lock = threading.Lock()
+    cache: list[CallGraph | None] = [None]
+
+    def factory(**kwargs) -> CallGraph:
+        if cache[0] is None:
+            with lock:
+                if cache[0] is None:
+                    cache[0] = build_reference_graph(root)
+        return cache[0]
+
+    return factory
+
+
 def run(argv: list[str] | None = None) -> None:
     """Run the MCP server to completion (blocks on the stdio loop)."""
     args = _parse_args(argv)
@@ -191,13 +218,17 @@ def run(argv: list[str] | None = None) -> None:
             default_dependency_depth=args.default_dependency_depth,
         )
         impact_factory = make_impact_analyzer_factory(args.repo)
+        inspect_factory = make_inspect_factory(args.repo)
     except McpError as exc:
         _fatal(exc)
         return
 
     firewall = build_firewall()
     server = build_mcp_server(
-        engine_factory, firewall, impact_factory=impact_factory
+        engine_factory,
+        firewall,
+        impact_factory=impact_factory,
+        inspect_factory=inspect_factory,
     )
 
     try:

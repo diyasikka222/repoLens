@@ -71,6 +71,14 @@ Priority (higher wins): `test` > `configuration` > `api_consumer` >
 `direct_dependency` > `indirect_dependency` > `reverse_dependency`. All evidence
 tags are preserved on the item regardless of the winning relationship.
 
+> When a Milestone 22 call graph is supplied (`reference_graph`), symbol targets
+> additionally yield `direct_caller` / `indirect_caller` / `direct_callee` /
+> `indirect_callee` relationships (priority `test > configuration >
+> direct_caller > api_consumer > direct_dependency > indirect_caller >
+> indirect_dependency > direct_callee > indirect_callee >
+> reverse_dependency`), each with `confidence="static"`. See
+> [call-graph.md](call-graph.md).
+
 Ordering within a result is deterministic: `(relationship_bucket, depth, path)`.
 
 ---
@@ -184,8 +192,10 @@ Initialization stays lazy: the root is validated at startup, the analyzer
 
 ## Limitations
 
-- Module-level edges only — no true call-graph (that would require a language
-  server); symbol findings are deliberately conservative.
+- M21 itself adds no call-graph; symbol findings are deliberately
+  conservative. (Milestone 22 adds a separate, offline *static* call graph with
+  its own guarantees — see [call-graph.md](call-graph.md) — and wires it in as
+  an *optional* `reference_graph`; without it this behavior is unchanged.)
 - Import resolution uses the existing parser's view of the repository;
   dynamic/`exec`-based import patterns are invisible.
 - Risk is a heuristic ranked warning, not a guarantee of breakage below a

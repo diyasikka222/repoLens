@@ -1,8 +1,8 @@
-"""Model Context Protocol (MCP) integration for RepoLens (Milestone 14).
+"""Model Context Protocol (MCP) integration for RepoLens (Milestones 14/21/22).
 
 Exposes RepoLens to AI coding agents through the Model Context Protocol.
 This layer is a *thin adapter*: it calls the existing public RepoLens APIs
-(:class:`~repolens.context.ContextEngine` and
+(:class:`~repolens.context.ContextEngine`,
 :class:`~repolens.context.ContextFirewall`) and never re-implements retrieval,
 ranking, budgeting, or security logic.
 
@@ -10,9 +10,9 @@ Architecture::
 
     Agent
       ↓
-    MCP (get_context)
+    MCP (get_context / analyze_impact / inspect_symbol)
       ↓
-    Context Firewall
+    Context Firewall / Impact Analysis / Call Graph
       ↓
     Context Engine
       ↓
@@ -22,7 +22,9 @@ The MCP server uses the **stdio** transport for local use by an IDE or
 terminal agent.  The primary tool is ``get_context``, which returns only
 firewall-cleared, safe context.  When an impact analyzer factory is wired in,
 the ``analyze_impact`` tool is exposed as well (deterministic change impact
-analysis; see :mod:`repolens.impact`).
+analysis; see :mod:`repolens.impact`).  When an M22 call-graph factory is
+wired in, the additive ``inspect_symbol`` tool exposes statically resolved
+call relationships (see :mod:`repolens.call_graph`).
 
 This package depends on the higher-level public RepoLens APIs; core
 components do not depend on this package, so MCP remains optional.
@@ -44,9 +46,17 @@ from repolens.mcp.impact_tool import (
     validate_max_depth,
     validate_target,
 )
+from repolens.mcp.inspect_tool import (
+    parse_inspect_arguments,
+    run_inspect_symbol,
+    validate_max_depth as validate_inspect_max_depth,
+    validate_name,
+)
 from repolens.mcp.server import (
     IMPACT_TOOL_DESCRIPTION,
     IMPACT_TOOL_NAME,
+    INSPECT_TOOL_DESCRIPTION,
+    INSPECT_TOOL_NAME,
     SERVER_NAME,
     SERVER_VERSION,
     TOOL_DESCRIPTION,
@@ -67,6 +77,8 @@ __all__ = [
     "FirewallError",
     "IMPACT_TOOL_DESCRIPTION",
     "IMPACT_TOOL_NAME",
+    "INSPECT_TOOL_DESCRIPTION",
+    "INSPECT_TOOL_NAME",
     "InternalError",
     "InvalidArgumentsError",
     "McpError",
@@ -78,12 +90,16 @@ __all__ = [
     "build_mcp_server",
     "parse_arguments",
     "parse_impact_arguments",
+    "parse_inspect_arguments",
     "run_analyze_impact",
     "run_get_context",
+    "run_inspect_symbol",
     "validate_dependency_depth",
+    "validate_inspect_max_depth",
     "validate_limit",
     "validate_max_depth",
     "validate_max_tokens",
+    "validate_name",
     "validate_query",
     "validate_target",
 ]

@@ -1,4 +1,4 @@
-"""Change impact analysis (Milestone 21).
+"""Change impact analysis (Milestone 21 + 22 call-graph integration).
 
 Deterministic, fully-offline analysis of *what changing a repository target
 could affect*, built exclusively on the existing RepoLens infrastructure:
@@ -6,7 +6,9 @@ could affect*, built exclusively on the existing RepoLens infrastructure:
 - the incremental :class:`~repolens.incremental_index.RepositoryIndex` snapshot
   (per-file parsed analysis and source, without re-reading/parsing);
 - the :class:`~repolens.graph.DependencyGraph` (import edges between files);
-- the :class:`~repolens.index.SymbolIndex` (where symbols are *defined*).
+- the :class:`~repolens.index.SymbolIndex` (where symbols are *defined*);
+- optionally, the Milestone 22 :class:`~repolens.call_graph.CallGraph` for
+  statically resolved callers/callees of symbol targets.
 
 It never executes repository code, never calls a language server, an LLM, or
 the network. Evidence is *conservative*: a relationship is reported only when
@@ -14,8 +16,8 @@ the existing static analysis can support it, and symbol-level claims are
 clearly separated from file/module dependency claims.
 
 If a relationship cannot be established reliably it is not labelled as
-certain. Multi-hop symbol *call* resolution (a true language-server call
-graph) is explicitly out of scope; see :doc:`/docs/impact-analysis`.
+certain. Multi-hop symbol *call* resolution without the optional call graph is
+explicitly out of scope; see :doc:`/docs/impact-analysis`.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from repolens.call_graph import CallGraph
 from repolens.graph import DependencyGraph, DependencyGraphBuilder
 from repolens.index import SymbolIndex, SymbolIndexBuilder
 from repolens.incremental_index import IncrementalIndexBuilder, RepositoryIndex
@@ -51,7 +54,11 @@ class Relationship(str, Enum):
       referencing the target's module;
     - :attr:`API_CONSUMER` — the file touches a *symbol* defined by the target
       (an import of that symbol, a base-class relationship, or a conservative
-      source-text reference), separate from the module-level dependency.
+      source-text reference), separate from the module-level dependency;
+    - :attr:`DIRECT_CALLER` / :attr:`INDIRECT_CALLER` — the file's code calls
+      the target symbol (statically resolved via the call graph);
+    - :attr:`DIRECT_CALLEE` / :attr:`INDIRECT_CALLEE` — the target symbol's
+      code calls the file's symbol (the target uses the file).
     """
 
     DIRECT_DEPENDENCY = "direct_dependency"
@@ -60,6 +67,10 @@ class Relationship(str, Enum):
     TEST = "test"
     CONFIGURATION = "configuration"
     API_CONSUMER = "api_consumer"
+    DIRECT_CALLER = "direct_caller"
+    INDIRECT_CALLER = "indirect_caller"
+    DIRECT_CALLEE = "direct_callee"
+    INDIRECT_CALLEE = "indirect_callee"
 
 
 #: Stable, machine-readable evidence tags attached to :class:`ImpactItem`.
@@ -75,28 +86,48 @@ EVIDENCE_TEST_IMPORT = "test_import"
 EVIDENCE_TEST_SYMBOL = "test_symbol_reference"
 EVIDENCE_CONFIG_IMPORT = "config_file_imports_target"
 EVIDENCE_CONFIG_TEXT = "config_text_reference"
+#: A call edge from the Milestone 22 static call graph (extractor evidence tag).
+EVIDENCE_RESOLVED_CALL = "resolved_ast_call"
 
 #: Priority used when a file matches several relationships (higher wins).
 #: A file gets exactly one ``relationship`` (its most specific pairing); the
 #: remaining evidence is preserved in :attr:`ImpactItem.evidence`.
 _RELATIONSHIP_PRIORITY = {
-    Relationship.TEST: 6,
-    Relationship.CONFIGURATION: 5,
-    Relationship.API_CONSUMER: 4,
-    Relationship.DIRECT_DEPENDENCY: 3,
-    Relationship.INDIRECT_DEPENDENCY: 2,
+    Relationship.TEST: 10,
+    Relationship.CONFIGURATION: 9,
+    Relationship.DIRECT_CALLER: 8,
+    Relationship.API_CONSUMER: 7,
+    Relationship.DIRECT_DEPENDENCY: 6,
+    Relationship.INDIRECT_CALLER: 5,
+    Relationship.INDIRECT_DEPENDENCY: 4,
+    Relationship.DIRECT_CALLEE: 3,
+    Relationship.INDIRECT_CALLEE: 2,
     Relationship.REVERSE_DEPENDENCY: 1,
 }
 
 #: Deterministic sort bucket per relationship (used for stable output order).
 _RELATIONSHIP_BUCKET = {
-    Relationship.DIRECT_DEPENDENCY: 0,
-    Relationship.INDIRECT_DEPENDENCY: 1,
-    Relationship.TEST: 2,
-    Relationship.API_CONSUMER: 3,
-    Relationship.CONFIGURATION: 4,
-    Relationship.REVERSE_DEPENDENCY: 5,
+    Relationship.DIRECT_CALLER: 0,
+    Relationship.DIRECT_CALLEE: 1,
+    Relationship.DIRECT_DEPENDENCY: 2,
+    Relationship.TEST: 3,
+    Relationship.INDIRECT_CALLER: 4,
+    Relationship.INDIRECT_CALLEE: 5,
+    Relationship.INDIRECT_DEPENDENCY: 6,
+    Relationship.API_CONSUMER: 7,
+    Relationship.CONFIGURATION: 8,
+    Relationship.REVERSE_DEPENDENCY: 9,
 }
+
+#: Relationships established from the statically resolved call graph.
+_CALL_RELATIONSHIPS = frozenset(
+    {
+        Relationship.DIRECT_CALLER,
+        Relationship.INDIRECT_CALLER,
+        Relationship.DIRECT_CALLEE,
+        Relationship.INDIRECT_CALLEE,
+    }
+)
 
 
 class RiskLevel(str, Enum):
@@ -137,6 +168,9 @@ class ImpactItem:
     symbol: str | None = None
     evidence: tuple[str, ...] = ()
     depth: int = 0
+    #: Resolution confidence for call-graph relationships ("static"), or
+    #: ``None`` for relationships derived without the M22 call graph.
+    confidence: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -147,6 +181,7 @@ class ImpactItem:
             "symbol": self.symbol,
             "evidence": list(self.evidence),
             "depth": self.depth,
+            "confidence": self.confidence,
         }
 
 
@@ -280,6 +315,7 @@ class ImpactAnalyzer:
         index: RepositoryIndex | None = None,
         graph: DependencyGraph | None = None,
         symbol_index: SymbolIndex | None = None,
+        reference_graph: CallGraph | None = None,
         config: ImpactConfig | None = None,
     ) -> None:
         self.root = Path(root)
@@ -295,6 +331,9 @@ class ImpactAnalyzer:
             if symbol_index is not None
             else SymbolIndexBuilder(self.root, index=index).build()
         )
+        #: Optional M22 static call graph. When supplied, symbol targets also
+        #: yield caller/callee relationships. ``None`` preserves M21 behavior.
+        self.reference_graph: CallGraph | None = reference_graph
         self._parser = PythonParser()
         self._modules: dict[str, Path] = self._build_module_map(index.files)
 
@@ -450,6 +489,10 @@ class ImpactAnalyzer:
             "api_consumers": 0,
             "configuration": 0,
             "reverse_dependencies": 0,
+            "direct_callers": 0,
+            "indirect_callers": 0,
+            "direct_callees": 0,
+            "indirect_callees": 0,
             "max_depth_reached": 0,
             "public_symbols": [],
             "exported": False,
@@ -540,6 +583,10 @@ class ImpactAnalyzer:
         if self.config.include_config:
             self._classify_config(candidates, resolved)
             self._add_non_python_config(candidates, resolved)
+
+        # Phase 4b: statically resolved callers/callees (M22 call graph).
+        if self.reference_graph is not None and resolved.symbol is not None:
+            self._classify_call_relationships(candidates, resolved, effective_depth)
 
         # Phase 5: reverse relationships (what the target itself imports).
         if self.config.include_reverse:
@@ -820,6 +867,123 @@ class ImpactAnalyzer:
     # Finalization and risk
     # ------------------------------------------------------------------
 
+    def _classify_call_relationships(
+        self,
+        candidates: dict[Path, _PendingItem],
+        target: ImpactTarget,
+        max_depth: int,
+    ) -> None:
+        """Add caller/callee relationships for symbol targets via the call graph.
+
+        Only relationships the call graph can support are added:
+        ``callers``/``callees`` walked over the bounded transitive queries. The
+        target file itself and paths already represented in ``candidates`` are
+        merged (their relationship is promoted to the more specific pairing).
+        """
+        node = self._call_node(target)
+        if node is None:
+            return
+
+        def add_callers(max_hops: int) -> None:
+            if max_hops < 1:
+                return
+            prior: set[str] = set()
+            for depth in range(1, max_hops + 1):
+                reached = self.reference_graph.bounded_transitive_callers(
+                    node, max_depth=depth
+                )
+                keys = {found.key for found in reached}
+                fresh = [found for found in reached if found.key not in prior]
+                prior |= keys
+                rel = (
+                    Relationship.DIRECT_CALLER
+                    if depth == 1
+                    else Relationship.INDIRECT_CALLER
+                )
+                for found in sorted(
+                    fresh, key=lambda f: (f.file_path.as_posix(), f.name or "")
+                ):
+                    if found.file_path == target.file_path:
+                        continue
+                    reason = (
+                        f"calls {target.label} directly"
+                        if rel is Relationship.DIRECT_CALLER
+                        else f"calls {target.label} transitively (depth {depth})"
+                    )
+                    self._merge(
+                        candidates,
+                        found.file_path,
+                        _PendingItem(
+                            relationship=rel,
+                            reason=reason,
+                            evidence=(EVIDENCE_RESOLVED_CALL,),
+                            depth=depth,
+                        ),
+                    )
+
+        def add_callees(max_hops: int) -> None:
+            if max_hops < 1:
+                return
+            prior: set[str] = set()
+            for depth in range(1, max_hops + 1):
+                reached = self.reference_graph.bounded_transitive_callees(
+                    node, max_depth=depth
+                )
+                keys = {found.key for found in reached}
+                fresh = [found for found in reached if found.key not in prior]
+                prior |= keys
+                rel = (
+                    Relationship.DIRECT_CALLEE
+                    if depth == 1
+                    else Relationship.INDIRECT_CALLEE
+                )
+                for found in sorted(
+                    fresh, key=lambda f: (f.file_path.as_posix(), f.name or "")
+                ):
+                    if found.file_path == target.file_path:
+                        continue
+                    reason = (
+                        f"{target.label} calls {found.name or 'module'} directly"
+                        if rel is Relationship.DIRECT_CALLEE
+                        else (
+                            f"{target.label} calls {found.name or 'module'} "
+                            f"transitively (depth {depth})"
+                        )
+                    )
+                    self._merge(
+                        candidates,
+                        found.file_path,
+                        _PendingItem(
+                            relationship=rel,
+                            reason=reason,
+                            evidence=(EVIDENCE_RESOLVED_CALL,),
+                            depth=depth,
+                        ),
+                    )
+
+        add_callers(max_depth)
+        add_callees(max_depth)
+
+    def _call_node(self, target: ImpactTarget):
+        """The call-graph node closest to an impact target, or ``None``.
+
+        Matches on ``(file_path, name)``; a module-level symbol is preferred
+        over a same-named method so callers of the definition are reported.
+        """
+        if self.reference_graph is None:
+            return None
+        matches = [
+            node
+            for node in self.reference_graph.get_nodes()
+            if node.file_path == target.file_path and node.name == target.symbol
+        ]
+        if not matches:
+            return None
+        return min(
+            matches,
+            key=lambda node: (node.parent_class is not None, node.parent_class or ""),
+        )
+
     def _finalize_items(
         self, candidates: dict[Path, _PendingItem], symbol: str | None,
     ) -> list[ImpactItem]:
@@ -827,6 +991,9 @@ class ImpactAnalyzer:
         for path, pending in candidates.items():
             public = bool(pending.symbol and not pending.symbol.startswith("_"))
             risk = _item_risk(pending.relationship, public)
+            confidence = (
+                "static" if pending.relationship in _CALL_RELATIONSHIPS else None
+            )
             items.append(
                 ImpactItem(
                     path=path,
@@ -836,6 +1003,7 @@ class ImpactAnalyzer:
                     symbol=pending.symbol,
                     evidence=tuple(sorted(pending.evidence)) if pending.evidence else (),
                     depth=pending.depth,
+                    confidence=confidence,
                 )
             )
         items.sort(
@@ -992,12 +1160,20 @@ def _clean_path(raw: str) -> Path:
 def _item_risk(relationship: Relationship, public_symbol: bool) -> RiskLevel:
     if relationship is Relationship.DIRECT_DEPENDENCY:
         return RiskLevel.HIGH
+    if relationship is Relationship.DIRECT_CALLER:
+        return RiskLevel.HIGH
     if relationship is Relationship.API_CONSUMER:
         return RiskLevel.HIGH if public_symbol else RiskLevel.MEDIUM
     if relationship is Relationship.TEST:
         return RiskLevel.MEDIUM
     if relationship is Relationship.INDIRECT_DEPENDENCY:
         return RiskLevel.MEDIUM
+    if relationship is Relationship.INDIRECT_CALLER:
+        return RiskLevel.MEDIUM
+    if relationship is Relationship.DIRECT_CALLEE:
+        return RiskLevel.MEDIUM
+    if relationship is Relationship.INDIRECT_CALLEE:
+        return RiskLevel.LOW
     if relationship is Relationship.CONFIGURATION:
         return RiskLevel.MEDIUM
     return RiskLevel.LOW
@@ -1012,6 +1188,10 @@ def _count_summary(summary: dict, candidates: dict[Path, _PendingItem]) -> dict:
         "api_consumers": 0,
         "configuration": 0,
         "reverse_dependencies": 0,
+        "direct_callers": 0,
+        "indirect_callers": 0,
+        "direct_callees": 0,
+        "indirect_callees": 0,
     }
     for pending in candidates.values():
         rel = pending.relationship
@@ -1027,5 +1207,13 @@ def _count_summary(summary: dict, candidates: dict[Path, _PendingItem]) -> dict:
             counts["configuration"] += 1
         elif rel is Relationship.REVERSE_DEPENDENCY:
             counts["reverse_dependencies"] += 1
+        elif rel is Relationship.DIRECT_CALLER:
+            counts["direct_callers"] += 1
+        elif rel is Relationship.INDIRECT_CALLER:
+            counts["indirect_callers"] += 1
+        elif rel is Relationship.DIRECT_CALLEE:
+            counts["direct_callees"] += 1
+        elif rel is Relationship.INDIRECT_CALLEE:
+            counts["indirect_callees"] += 1
     summary.update(counts)
     return summary
