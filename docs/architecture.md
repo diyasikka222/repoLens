@@ -10,6 +10,11 @@ graph is a **pure projection** of the incremental repository index and the
 existing dependency graph — no file is re-parsed, no new parser is
 introduced, and no MCP / context-engine / impact-analysis behavior changes.
 
+> **M23.3**: the graph, architecture-aware retrieval, and subsystem discovery
+> are also exposed through four additive MCP tools (`inspect_architecture`,
+> `discover_subsystems`, `architecture_candidates`,
+> `explain_architecture_match`). See [Architecture MCP Tools](architecture-mcp.md).
+
 ---
 
 ## What it answers

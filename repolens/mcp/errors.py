@@ -50,5 +50,9 @@ class FirewallError(McpError):
     """The context firewall failed during inspection."""
 
 
+class ArchitectureError(McpError):
+    """Running an architecture-intelligence query failed (M23.3)."""
+
+
 class InternalError(McpError):
     """An unexpected internal failure (generic safe message)."""

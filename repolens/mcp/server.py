@@ -24,6 +24,17 @@ from mcp.server.mcpserver import MCPServer
 from mcp import types
 
 from repolens.context import ContextFirewall
+from repolens.mcp.architecture_tool import (
+    ArchitectureFactory,
+    parse_architecture_candidates_arguments,
+    parse_discover_subsystems_arguments,
+    parse_explain_architecture_match_arguments,
+    parse_inspect_architecture_arguments,
+    run_architecture_candidates,
+    run_discover_subsystems,
+    run_explain_architecture_match,
+    run_inspect_architecture,
+)
 from repolens.mcp.errors import McpError
 from repolens.mcp.impact_tool import (
     ImpactFactory,
@@ -45,6 +56,10 @@ SERVER_VERSION = "0.1.0"
 TOOL_NAME = "get_context"
 IMPACT_TOOL_NAME = "analyze_impact"
 INSPECT_TOOL_NAME = "inspect_symbol"
+ARCHITECTURE_TOOL_NAME = "inspect_architecture"
+SUBSYSTEMS_TOOL_NAME = "discover_subsystems"
+CANDIDATES_TOOL_NAME = "architecture_candidates"
+EXPLAIN_ARCH_TOOL_NAME = "explain_architecture_match"
 
 TOOL_DESCRIPTION = (
     "Search the repository and return a safe context package for the given "
@@ -88,6 +103,55 @@ INSPECT_TOOL_DESCRIPTION = (
     "server is consulted. Findings reflect what the code itself references."
 )
 
+ARCHITECTURE_TOOL_DESCRIPTION = (
+    "Inspect the repository architecture around a single target. Accepts a "
+    "repo-relative file path (e.g. 'store/services/checkout.py'), a dotted "
+    "module (e.g. 'store.services.checkout'), or a package path (e.g. "
+    "'store/repositories').\n\n"
+    "Returns structured output: the resolved node type, its package / module / "
+    "file identities, containing package, subsystem, direct dependencies and "
+    "dependents, and a bounded transitive neighborhood (max_depth, default 2). "
+    "Statistics include direct/transitive dependency and dependent counts, "
+    "package file/module membership, and optional subsystem stats. Depth is "
+    "capped and the response is deterministic. Unknown targets are rejected "
+    "with a safe message; it never dumps the whole repository."
+)
+
+SUBSYSTEMS_TOOL_DESCRIPTION = (
+    "List the deterministic architectural subsystems of the repository. "
+    "Subsystems are discovered with plain graph heuristics (top-level package "
+    "trees) — no LLM is used for naming.\n\n"
+    "Returns each subsystem's id and display name, its packages, modules, "
+    "files, entry modules, optional dependency/dependent subsystem ids, and "
+    "optional statistics. Ordering is deterministic (by id). Controllable via "
+    "max_subsystems (capped)."
+)
+
+CANDIDATES_TOOL_DESCRIPTION = (
+    "Generate architecture-aware candidates for a query, independent of full "
+    "context retrieval. Accepts a free-text query and returns the bounded, "
+    "deterministic set of architecture candidates (direct matches, "
+    "dependencies/dependents, neighbors, package and subsystem proximity).\n\n"
+    "Each candidate reports its file, module, package, score, architecture "
+    "score (rank), inclusion reason (e.g. 'architecture: direct package "
+    "match', 'architecture: dependency of matched module'), node type, "
+    "subsystem, and dependency direction. The query's matched signals are "
+    "returned too. Bounded by limit (default 20) and max_depth (default 1); "
+    "an optional 'architecture' configuration object further caps expansion. "
+    "Deterministic."
+)
+
+EXPLAIN_ARCH_TOOL_DESCRIPTION = (
+    "Explain why a specific file, module, or package was (or was not) "
+    "considered architecturally relevant to a query.\n\n"
+    "Returns the query's architecture signals, the matched nodes for the "
+    "query, the target's inclusion reason and architecture score, its "
+    "subsystem relationship, and bounded dependency path(s) from a matched "
+    "module to the target. When the target was not architecturally relevant a "
+    "structured explanation is returned (never an exception). Unknown or "
+    "unsafe targets produce a safe validation error."
+)
+
 
 def build_mcp_server(
     engine_factory: EngineFactory,
@@ -95,6 +159,7 @@ def build_mcp_server(
     *,
     impact_factory: ImpactFactory | None = None,
     inspect_factory: InspectFactory | None = None,
+    architecture_factory: ArchitectureFactory | None = None,
     server_name: str = SERVER_NAME,
     server_version: str = SERVER_VERSION,
 ) -> MCPServer:
@@ -112,6 +177,12 @@ def build_mcp_server(
             :class:`repolens.call_graph.CallGraph`; when provided, the
             additive ``inspect_symbol`` tool is registered. Independent of
             ``impact_factory``.
+        architecture_factory: Optional callable returning the shared
+            :class:`~repolens.mcp.architecture_tool.ArchitectureState`; when
+            provided, the four additive M23.3 architecture tools are
+            registered (``inspect_architecture``, ``discover_subsystems``,
+            ``architecture_candidates``, ``explain_architecture_match``).
+            Independent of the other factories.
         server_name: MCP server name.
         server_version: MCP server version.
     """
@@ -242,7 +313,120 @@ def build_mcp_server(
             description=INSPECT_TOOL_DESCRIPTION,
         )
 
+    if architecture_factory is not None:
+        _register_architecture_tools(server, architecture_factory)
+
     return server
+
+
+def _register_architecture_tools(server: MCPServer, architecture_factory: ArchitectureFactory) -> None:
+    """Register the four additive M23.3 architecture tools (unchanged core).
+
+    Each tool declares an explicit parameter signature so the MCP SDK derives a
+    precise input schema (same pattern as the core, impact, and inspect tools)
+    and all values are validated by the tool-specific ``parse_*`` function.
+    """
+    from mcp import types
+
+    def _invoke(parse, run, **kwargs) -> types.CallToolResult:
+        try:
+            parsed = parse(dict(kwargs))
+        except McpError as exc:
+            _log_diagnostic(exc)
+            return _error_result(exc.safe_message)
+        try:
+            return run(architecture_factory, **parsed)
+        except McpError as exc:
+            _log_diagnostic(exc)
+            return _error_result(exc.safe_message)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Unexpected failure in an architecture tool: %s",
+                type(exc).__name__,
+            )
+            return _error_result(
+                "An unexpected internal error occurred while processing "
+                "the architecture query."
+            )
+
+    def inspect_architecture(
+        target: str,
+        max_depth: int | None = None,
+        include_dependencies: bool | None = None,
+        include_dependents: bool | None = None,
+        include_subsystems: bool | None = None,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_inspect_architecture_arguments,
+            run_inspect_architecture,
+            target=target,
+            max_depth=max_depth,
+            include_dependencies=include_dependencies,
+            include_dependents=include_dependents,
+            include_subsystems=include_subsystems,
+        )
+
+    def discover_subsystems(
+        max_subsystems: int | None = None,
+        include_dependencies: bool | None = None,
+        include_dependents: bool | None = None,
+        include_stats: bool | None = None,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_discover_subsystems_arguments,
+            run_discover_subsystems,
+            max_subsystems=max_subsystems,
+            include_dependencies=include_dependencies,
+            include_dependents=include_dependents,
+            include_stats=include_stats,
+        )
+
+    def architecture_candidates(
+        query: str,
+        limit: int | None = None,
+        max_depth: int | None = None,
+        architecture: dict | None = None,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_architecture_candidates_arguments,
+            run_architecture_candidates,
+            query=query,
+            limit=limit,
+            max_depth=max_depth,
+            architecture=architecture,
+        )
+
+    def explain_architecture_match(
+        query: str,
+        target: str,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_explain_architecture_match_arguments,
+            run_explain_architecture_match,
+            query=query,
+            target=target,
+        )
+
+    server.add_tool(
+        inspect_architecture,
+        name=ARCHITECTURE_TOOL_NAME,
+        description=ARCHITECTURE_TOOL_DESCRIPTION,
+    )
+    server.add_tool(
+        discover_subsystems,
+        name=SUBSYSTEMS_TOOL_NAME,
+        description=SUBSYSTEMS_TOOL_DESCRIPTION,
+    )
+    server.add_tool(
+        architecture_candidates,
+        name=CANDIDATES_TOOL_NAME,
+        description=CANDIDATES_TOOL_DESCRIPTION,
+    )
+    server.add_tool(
+        explain_architecture_match,
+        name=EXPLAIN_ARCH_TOOL_NAME,
+        description=EXPLAIN_ARCH_TOOL_DESCRIPTION,
+    )
 
 
 def _error_result(safe_message: str) -> types.CallToolResult:

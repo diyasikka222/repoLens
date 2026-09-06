@@ -192,6 +192,33 @@ def make_inspect_factory(root) -> Callable[..., "CallGraph"]:
     return factory
 
 
+def make_architecture_factory(root) -> Callable[..., "ArchitectureState"]:
+    """Return a factory that lazily builds and caches the shared M23.3 state.
+
+    The root is validated eagerly (fail fast at startup); the incremental
+    index, the architecture graph (a pure projection of that index), and the
+    subsystem discovery result are all built on the first architecture-tool
+    call and reused by every subsequent call. Because the index build shares
+    the persistent cache with the other factories, no re-parsing occurs when a
+    warm index already exists for the repository.
+    """
+    from repolens.mcp.architecture_tool import ArchitectureState
+
+    root = validate_repository_root(root)
+
+    lock = threading.Lock()
+    cache: list[ArchitectureState | None] = [None]
+
+    def factory(**kwargs) -> ArchitectureState:
+        if cache[0] is None:
+            with lock:
+                if cache[0] is None:
+                    cache[0] = ArchitectureState(root)
+        return cache[0]
+
+    return factory
+
+
 def run(argv: list[str] | None = None) -> None:
     """Run the MCP server to completion (blocks on the stdio loop)."""
     args = _parse_args(argv)
@@ -219,6 +246,7 @@ def run(argv: list[str] | None = None) -> None:
         )
         impact_factory = make_impact_analyzer_factory(args.repo)
         inspect_factory = make_inspect_factory(args.repo)
+        architecture_factory = make_architecture_factory(args.repo)
     except McpError as exc:
         _fatal(exc)
         return
@@ -229,6 +257,7 @@ def run(argv: list[str] | None = None) -> None:
         firewall,
         impact_factory=impact_factory,
         inspect_factory=inspect_factory,
+        architecture_factory=architecture_factory,
     )
 
     try:
