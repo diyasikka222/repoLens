@@ -25,6 +25,7 @@ from repolens import diagnostics
 from repolens.context.budget import select_within_budget
 from repolens.context.candidate import (
     INCLUSION_API_CONSUMER,
+    INCLUSION_ARCHITECTURE,
     INCLUSION_CONFIGURATION,
     INCLUSION_DEPENDENCY,
     INCLUSION_DEPENDENT,
@@ -86,10 +87,24 @@ class ContextEngine:
         index: object | None = None,
         reference_graph: object | None = None,
         primary_limit: int = DEFAULT_PRIMARY_LIMIT,
+        architecture: object | None = None,
     ) -> None:
         self.root = Path(root)
         if not self.root.is_dir():
             raise NotADirectoryError(f"repository root is not a directory: {self.root}")
+
+        # M23.2 architecture-aware retrieval is opt-in via ``architecture=``.
+        # When the caller supplies a configuration (and does not pass an
+        # incremental index), a single index snapshot is materialised here so
+        # the DependencyGraphBuilder, SymbolIndexBuilder, and
+        # ArchitectureGraphBuilder share exactly one scan/parse pass.
+        self._arch_config = architecture
+        if (
+            getattr(self._arch_config, "enabled", False)
+            and index is None
+        ):
+            from repolens.incremental_index import IncrementalIndexBuilder
+            index = IncrementalIndexBuilder(self.root, persist=False).build()
 
         if searcher is not None:
             self._searcher = searcher
@@ -115,6 +130,9 @@ class ContextEngine:
         # Optional M22 static call graph: when present, change-aware contexts
         # also surface statically resolved callers/callees of the target symbol.
         self._reference_graph = reference_graph
+        # Architecture graph and subsystems are built lazily on first use.
+        self._arch_graph = None
+        self._arch_subsystems = None
 
     def build_context(self, query: str) -> ContextPackage:
         """Compute a context package for ``query``."""
@@ -124,6 +142,27 @@ class ContextEngine:
             query, self.root, index=None, symbol_index=self._symbol_index
         )
         symbol_paths = symbol_file_paths(symbol_matches)
+
+        # M23.2 architecture enrichment happens *before* dependency expansion so
+        # its direct matches can anchor the expansion seeds.
+        arch_matches = ()
+        arch_direct_paths: set = set()
+        if getattr(self._arch_config, "enabled", False):
+            from repolens.architecture_retrieval import architecture_candidates
+
+            self._ensure_architecture()
+            arch_matches = architecture_candidates(
+                query,
+                self._arch_graph,
+                subsystems=self._arch_subsystems,
+                symbol_matches=symbol_matches,
+                config=self._arch_config,
+            )
+            arch_direct_paths = {
+                Path(candidate.path)
+                for candidate in arch_matches
+                if candidate.rank == 0
+            }
 
         results = self._searcher.search(query, limit=self._primary_limit)
         primary_meta = [
@@ -140,10 +179,17 @@ class ContextEngine:
         # Anchor expansion on the symbol-matched file(s) when the query names
         # one (a precise dependency/impact or implementation question), so the
         # expanded files are the true neighbours of the referenced symbol
-        # rather than unrelated co-retrieved primaries.
+        # rather than unrelated co-retrieved primaries. When architecture
+        # enrichment found direct matches (and no symbol was named), anchor on
+        # those instead.
+        combined_seeds = (
+            sorted(set(symbol_paths) | arch_direct_paths)
+            if (symbol_paths or arch_direct_paths)
+            else []
+        )
         expansion_seeds = (
-            sorted(symbol_paths)
-            if symbol_paths
+            combined_seeds
+            if combined_seeds
             else [candidate.path for candidate in primary_candidates]
         )
         dependency_nodes = expand_dependencies(
@@ -152,8 +198,15 @@ class ContextEngine:
             config=eff_config,
         )
         dependency_candidates = self._build_dependency_candidates(dependency_nodes)
+        architecture_candidates_ctx = self._build_architecture_candidates(
+            arch_matches
+        )
 
-        all_candidates = list(primary_candidates) + list(dependency_candidates)
+        all_candidates = (
+            list(primary_candidates)
+            + list(dependency_candidates)
+            + list(architecture_candidates_ctx)
+        )
         # Never include the same file twice: a file that is both a retrieved
         # primary and a dependency-expanded node keeps its higher-priority
         # (primary) role and retains its retrieval signals.
@@ -166,7 +219,8 @@ class ContextEngine:
             budget=self._budget,
             selected_files=tuple(selected),
             primary_candidates=tuple(primary_candidates),
-            dependency_candidates=tuple(dependency_candidates),
+            dependency_candidates=tuple(dependency_candidates)
+            + tuple(architecture_candidates_ctx),
             excluded_candidates=tuple(excluded),
             intent=intent,
             matched_symbols=tuple(s.symbol.name for s in symbol_matches),
@@ -181,6 +235,7 @@ class ContextEngine:
                 context_size=package.total_estimated_tokens,
                 budget=self._budget.max_tokens,
                 intent=intent.value,
+                architecture_candidates=len(architecture_candidates_ctx),
             )
         return package
 
@@ -189,6 +244,75 @@ class ContextEngine:
         from repolens.context.render import render_context
 
         return render_context(package)
+
+    # -- architecture-aware retrieval (M23.2) --------------------------------
+
+    def _ensure_architecture(self) -> None:
+        """Lazily build the architecture graph and subsystems (once)."""
+        if self._arch_graph is not None:
+            return
+        from repolens.architecture import ArchitectureGraphBuilder
+        from repolens.subsystems import discover_subsystems
+
+        self._arch_graph = ArchitectureGraphBuilder(
+            self.root, index=self._index, graph=self._graph
+        ).build()
+        self._arch_subsystems = discover_subsystems(self._arch_graph)
+
+    def _effective_arch_config(self):
+        """Return the architecture retrieval config actually in effect.
+
+        An explicit configuration is respected verbatim (so ``enabled=False``
+        disables architecture queries); without one, the default limits are
+        used so the public architecture query surface works out of the box.
+        """
+        if self._arch_config is not None:
+            return self._arch_config
+        from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+
+        return ArchitectureRetrievalConfig()
+
+    def architecture_candidates(self, query: str) -> list[ArchitectureCandidate]:
+        """Return the bounded architecture candidates for ``query``.
+
+        The pipeline is: architecture signals -> direct matches (rank 0) ->
+        bounded neighbourhood expansion (rank 1) -> proximity/subsystem context
+        (rank 2). Returns ``[]`` when the query yields no architecture signal
+        or when architecture retrieval is explicitly disabled.
+        """
+        from repolens.architecture_retrieval import architecture_candidates
+
+        config = self._effective_arch_config()
+        if not config.enabled:
+            return []
+        self._ensure_architecture()
+        return architecture_candidates(
+            query,
+            self._arch_graph,
+            subsystems=self._arch_subsystems,
+            config=config,
+        )
+
+    def discover_subsystems(self):
+        """Return the deterministic subsystem list for the repository."""
+        self._ensure_architecture()
+        return self._arch_subsystems
+
+    def explain_architecture_match(self, query: str, node_id) -> dict | None:
+        """Explain whether/why ``query`` selected ``node_id`` as an
+        architecture match (deterministic dict, or ``None``).
+        """
+        from repolens.architecture_retrieval import explain_architecture_match
+
+        config = self._effective_arch_config()
+        self._ensure_architecture()
+        return explain_architecture_match(
+            query,
+            self._arch_graph,
+            node_id,
+            subsystems=self._arch_subsystems,
+            config=config,
+        )
 
     # -- change-aware impact context (Milestone 21) --------------------------
 
@@ -397,6 +521,39 @@ class ContextEngine:
                     selection_reason=_dependency_reason(node),
                     inclusion_reason=inclusion,
                     graph_distance=node.distance,
+                )
+            )
+        return candidates
+
+    def _build_architecture_candidates(
+        self, architecture_matches,
+    ) -> list[ContextCandidate]:
+        """Turn raw architecture matches into :class:`ContextCandidate` objects.
+
+        Architecture candidates join the pipeline as dependency-role candidates
+        carrying their architecture rank and metadata, so the ranking policy
+        interleaves them deterministically without disturbing the primary layer.
+        """
+        candidates: list[ContextCandidate] = []
+        for match in architecture_matches:
+            path = Path(match.path)
+            source = self._read_source(path)
+            candidates.append(
+                ContextCandidate(
+                    path=path,
+                    source=source,
+                    role=CandidateRole.DEPENDENCY,
+                    estimated_tokens=estimate_tokens(source),
+                    selection_reason=match.reason,
+                    inclusion_reason=INCLUSION_ARCHITECTURE,
+                    architecture_rank=match.rank,
+                    architecture_metadata={
+                        "node_kind": match.node.kind.value,
+                        "node_id": match.node.id,
+                        "package": match.package,
+                        "subsystem": match.subsystem,
+                        "direction": match.direction.value,
+                    },
                 )
             )
         return candidates

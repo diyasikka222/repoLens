@@ -57,7 +57,7 @@ class ContextPackage:
 
 
 def _candidate_dict(candidate: ContextCandidate) -> dict:
-    return {
+    d = {
         "path": candidate.path.as_posix(),
         "role": candidate.role.value,
         "estimated_tokens": candidate.estimated_tokens,
@@ -69,6 +69,11 @@ def _candidate_dict(candidate: ContextCandidate) -> dict:
         "semantic_rank": candidate.semantic_rank,
         "graph_distance": candidate.graph_distance,
     }
+    if candidate.architecture_rank is not None:
+        d["architecture_rank"] = candidate.architecture_rank
+    if candidate.architecture_metadata is not None:
+        d["architecture_metadata"] = candidate.architecture_metadata
+    return d
 
 
 def _excluded_dict(candidate: ExcludedCandidate) -> dict:

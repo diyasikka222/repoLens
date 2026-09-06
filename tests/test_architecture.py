@@ -379,3 +379,44 @@ def test_unresolvable_relative_import_never_crashes(tmp_path: Path) -> None:
     assert graph.get_file_node("pkg/__init__.py") is not None
     assert graph.get_file_node("pkg/a.py") is not None
     assert graph.stats().depends_on_edges == 0
+
+
+# ---------------------------------------------------------------------------
+# Subsystem discovery (Milestone 23.2)
+# ---------------------------------------------------------------------------
+
+
+def test_subsystem_discovery_for_app_only_repository(graph) -> None:
+    from repolens.subsystems import discover_subsystems
+
+    discovered = discover_subsystems(graph)
+    assert [s.id for s in discovered] == ["app"]
+    (app,) = discovered
+    assert app.modules == (
+        "app",
+        "app.api",
+        "app.api.routes",
+        "app.models",
+        "app.models.user",
+        "app.repositories",
+        "app.repositories.users",
+        "app.services",
+        "app.services._helpers",
+        "app.services.users",
+    )
+    # Dependencies, dependents, and entry points are all intra-repository.
+    assert app.stats()["packages"] == 5
+    assert app.stats()["files"] == 10
+
+
+def test_subsystem_discovery_is_deterministic_across_builds(graph) -> None:
+    from repolens.subsystems import discover_subsystems
+
+    second = _rebuild(ROOT)
+    assert discover_subsystems(second) == discover_subsystems(graph)
+
+
+def test_subsystem_discovery_empty_repository(tmp_path: Path) -> None:
+    from repolens.subsystems import discover_subsystems
+
+    assert discover_subsystems(_rebuild(tmp_path)) == []

@@ -45,6 +45,10 @@ INCLUSION_TEST = "test"
 INCLUSION_API_CONSUMER = "api_consumer"
 INCLUSION_CONFIGURATION = "configuration"
 
+#: Architecture-driven inclusion category (Milestone 23.2). Additive:
+#: backward-compatible; existing categories and behaviour are unchanged.
+INCLUSION_ARCHITECTURE = "architecture"
+
 
 @dataclass(frozen=True)
 class ContextCandidate:
@@ -67,6 +71,12 @@ class ContextCandidate:
 
     # Machine-readable inclusion category (Milestone 19).
     inclusion_reason: str | None = None
+
+    # Architecture-aware context metadata (Milestone 23.2). Additive and
+    # backward-compatible: defaulting to None means existing construction sites
+    # and serialization paths are unaffected.
+    architecture_rank: int | None = None
+    architecture_metadata: dict | None = None
 
 
 @dataclass(frozen=True)

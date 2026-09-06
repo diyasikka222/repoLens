@@ -56,8 +56,17 @@ def _candidate_key(candidate: ContextCandidate) -> tuple:
         CandidateRole.DEPENDENCY: 1,
     }
     distance = candidate.graph_distance if candidate.graph_distance is not None else 10**9
+    # Architecture rank creates a pre-distance bucket: 0 = direct match,
+    # 1 = neighbour, 2 = generic proximity; bucket 3 = no architecture signal
+    # (the historical behaviour, unchanged when architecture is disabled).
+    arch_bucket = (
+        min(candidate.architecture_rank, 2)
+        if candidate.architecture_rank is not None
+        else 3
+    )
     return (
         1,
+        arch_bucket,
         distance,
         role_order[candidate.role],
         candidate.path.as_posix(),

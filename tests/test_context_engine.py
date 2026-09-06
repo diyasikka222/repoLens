@@ -456,3 +456,114 @@ def test_rendering_is_deterministic_and_contains_blocks() -> None:
     assert "## Primary Context" in text
     assert "```python" in text
     assert text == render_context(pkg)
+
+
+# ---------------------------------------------------------------------------
+# Architecture-aware retrieval (Milestone 23.2)
+# ---------------------------------------------------------------------------
+
+ARCH_REPO = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "architecture_retrieval_repository"
+)
+
+
+def build_arch_engine(arch=None, **kwargs):
+    return ContextEngine(
+        ARCH_REPO,
+        searcher=CodeSearcher(ARCH_REPO),
+        architecture=arch,
+        **kwargs,
+    )
+
+
+def test_engine_architecture_enabled_adds_arch_candidates() -> None:
+    from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+    from repolens.context.candidate import INCLUSION_ARCHITECTURE
+
+    engine = build_arch_engine(
+        arch=ArchitectureRetrievalConfig(),
+        budget=ContextBudget(max_tokens=10**9),
+    )
+    pkg = engine.build_context("how does the checkout flow work")
+    arch = [c for c in pkg.selected_files if c.inclusion_reason == INCLUSION_ARCHITECTURE]
+    assert arch
+    assert all(c.architecture_rank is not None for c in arch)
+    for c in arch:
+        meta = c.architecture_metadata
+        assert {"node_kind", "node_id", "package", "subsystem", "direction"} <= set(meta)
+    # Architecture-only additions: lexically undiscoverable dependent + neighbor
+    # modules the plain retrieval would never surface.
+    billing = next(c for c in arch if c.path == Path("tests/test_billing.py"))
+    assert billing.architecture_metadata["subsystem"] == "tests"
+    assert billing.architecture_rank == 1
+    services_init = next(
+        c for c in arch if c.path == Path("store/services/__init__.py")
+    )
+    assert services_init.architecture_metadata["subsystem"] == "store"
+    # The direct checkout module merged into the lexical primary but is present.
+    assert Path("store/services/checkout.py") in {c.path for c in pkg.selected_files}
+
+
+def test_engine_architecture_disabled_matches_default_behavior() -> None:
+    from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+    from repolens.context.candidate import INCLUSION_ARCHITECTURE
+
+    default = build_arch_engine(
+        budget=ContextBudget(max_tokens=10**9)
+    ).build_context("invoice checkout")
+    disabled = build_arch_engine(
+        arch=ArchitectureRetrievalConfig(enabled=False),
+        budget=ContextBudget(max_tokens=10**9),
+    ).build_context("invoice checkout")
+
+    assert {c.path for c in default.selected_files} == {
+        c.path for c in disabled.selected_files
+    }
+    assert all(
+        c.inclusion_reason != INCLUSION_ARCHITECTURE
+        for c in disabled.selected_files
+    )
+    assert not any(c.architecture_metadata for c in disabled.selected_files)
+
+
+def test_engine_architecture_budget_is_respected() -> None:
+    from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+
+    engine = build_arch_engine(
+        arch=ArchitectureRetrievalConfig(),
+        budget=ContextBudget(max_tokens=120),
+    )
+    pkg = engine.build_context("checkout flow")
+    assert pkg.total_estimated_tokens <= 120
+
+
+def test_engine_public_architecture_query_surface() -> None:
+    from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+
+    engine = build_arch_engine(arch=ArchitectureRetrievalConfig())
+    candidates = engine.architecture_candidates("checkout")
+    assert candidates
+    assert any(c.node.id == "store.services.checkout" for c in candidates)
+
+    subsystems = engine.discover_subsystems()
+    assert {s.id for s in subsystems} == {
+        "admin", "app", "billing", "store", "tests", "web",
+    }
+
+    explanation = engine.explain_architecture_match("checkout", "store.services.checkout")
+    assert explanation is not None
+    assert explanation["reason"] == "architecture: direct module match"
+
+
+def test_engine_render_includes_architecture_line() -> None:
+    from repolens.architecture_retrieval import ArchitectureRetrievalConfig
+
+    engine = build_arch_engine(
+        arch=ArchitectureRetrievalConfig(),
+        budget=ContextBudget(max_tokens=10**9),
+    )
+    pkg = engine.build_context("checkout flow")
+    text = render_context(pkg)
+    assert "Architecture:" in text

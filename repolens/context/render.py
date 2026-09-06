@@ -64,6 +64,19 @@ def _render_candidate(candidate) -> list[str]:
         lines.append(f"Retrieval rank: {candidate.retrieval_rank}")
     if candidate.role is not CandidateRole.PRIMARY:
         lines.append(f"Graph distance: {candidate.graph_distance}")
+    if candidate.architecture_metadata:
+        meta = candidate.architecture_metadata
+        arch_parts = []
+        if candidate.architecture_rank is not None:
+            arch_parts.append(f"rank {candidate.architecture_rank}")
+        if meta.get("direction"):
+            arch_parts.append(meta["direction"])
+        if meta.get("subsystem"):
+            arch_parts.append(f"subsystem {meta['subsystem']}")
+        if meta.get("node_id"):
+            arch_parts.append(meta["node_id"])
+        if arch_parts:
+            lines.append("Architecture: " + " | ".join(arch_parts))
     lines.append("")
     lines.append("```python")
     lines.append(candidate.source.rstrip())
