@@ -133,9 +133,68 @@ class ContextEngine:
         # Architecture graph and subsystems are built lazily on first use.
         self._arch_graph = None
         self._arch_subsystems = None
+        # M24.2: a single shared change-plan engine, built lazily on the first
+        # change-aware build. It reuses the index/graph/symbol indexes above,
+        # so no repository re-parse ever happens.
+        self._change_plan_engine = None
 
-    def build_context(self, query: str) -> ContextPackage:
-        """Compute a context package for ``query``."""
+    def build_context(
+        self,
+        query: str,
+        *,
+        change_request: str | None = None,
+        change_target: str | None = None,
+        change_plan: object | None = None,
+        change_plan_engine: object | None = None,
+        change_plan_config: object | None = None,
+        change_options: object | None = None,
+    ) -> ContextPackage:
+        """Compute a context package for ``query``.
+
+        ``query`` alone runs the existing pipeline byte-for-byte unchanged
+        (Milestone 24 backward-compatibility). When ``change_request`` is
+        provided, the plan from the change-plan layer is folded into the same
+        ranking and budget stages as change-plan candidates (a final tier that
+        never outranks retrieval primaries or dependency-expanded files).
+        """
+        if change_request is None:
+            return self._build_context_standard(query)
+        return self._build_context_with_change(
+            query,
+            change_request=change_request,
+            change_target=change_target,
+            change_plan=change_plan,
+            change_plan_engine=change_plan_engine,
+            change_plan_config=change_plan_config,
+            change_options=change_options,
+        )
+
+    def change_plan_engine(self, config: object | None = None):
+        """Return (and lazily build once) the shared change-plan engine.
+
+        The engine reuses this context engine's existing index, dependency
+        graph, symbol index, and static call graph — never re-parsing the
+        repository. An explicit ``config`` only widens/narrows plan bounds for
+        the whole shared engine.
+        """
+        from repolens.change_plan import ChangePlanConfig, ChangePlanEngine
+
+        if self._change_plan_engine is not None:
+            return self._change_plan_engine
+        self._change_plan_engine = ChangePlanEngine(
+            self.root,
+            index=self._index,
+            dependency_graph=self._graph,
+            symbol_index=self._symbol_index,
+            call_graph=self._reference_graph,
+            arch_graph=self._arch_graph,
+            subsystems=self._arch_subsystems,
+            config=config if config is not None else ChangePlanConfig(),
+        )
+        return self._change_plan_engine
+
+    def _build_context_standard(self, query: str) -> ContextPackage:
+        """The unchanged Milestone-standard context pipeline for ``query``."""
         start = time.perf_counter()
         intent = classify_intent(query)
         symbol_matches = match_symbols(
@@ -238,6 +297,152 @@ class ContextEngine:
                 architecture_candidates=len(architecture_candidates_ctx),
             )
         return package
+
+    def _build_context_with_change(
+        self,
+        query: str,
+        *,
+        change_request: str,
+        change_target: str | None,
+        change_plan: object | None,
+        change_plan_engine: object | None,
+        change_plan_config: object | None,
+        change_options: object | None,
+    ) -> ContextPackage:
+        """Change-aware context: standard pipeline folded with change signals.
+
+        The standard candidate set is computed through the unchanged retrieval,
+        expansion, and architecture stages, then change-plan candidates are
+        appended as a clearly-separated final tier. Joint ranking and budgeting
+        are applied, so a change-plan candidate only displaces a lower-ranked
+        file within the same context budget — direct query matches always win.
+        """
+        from repolens.change_context import (
+            ChangeContextOptions,
+            plan_to_change_candidates,
+        )
+
+        start = time.perf_counter()
+        options = change_options if change_options is not None else ChangeContextOptions()
+        if change_plan is None:
+            engine = change_plan_engine or self.change_plan_engine(change_plan_config)
+            change_plan = engine.plan(change_request, target=change_target)
+        change_candidates = plan_to_change_candidates(
+            change_plan,
+            options=options,
+            root=self.root,
+        )
+
+        standard = self._collect_standard_candidates(query)
+        all_candidates = (
+            standard["primary"]
+            + standard["dependency"]
+            + standard["architecture"]
+            + change_candidates
+        )
+        all_candidates = _dedupe_candidates(all_candidates)
+        ranked = rank_candidates(all_candidates)
+        selected, excluded = select_within_budget(ranked, self._budget)
+        selected_paths = {c.path for c in selected}
+        surviving_changes = tuple(
+            _dedupe_candidates(
+                [c for c in change_candidates if c.path in selected_paths]
+            )
+        )
+
+        package = ContextPackage(
+            query=query,
+            budget=self._budget,
+            selected_files=tuple(selected),
+            primary_candidates=tuple(standard["primary"]),
+            dependency_candidates=tuple(standard["dependency"])
+            + tuple(standard["architecture"]),
+            excluded_candidates=tuple(excluded),
+            intent=standard["intent"],
+            matched_symbols=tuple(s.symbol.name for s in standard["symbol_matches"]),
+            change_candidates=surviving_changes,
+        )
+        if diagnostics.enabled():
+            diagnostics.record(
+                "context_build_with_change",
+                repository=str(self.root),
+                change_request=change_request,
+                change_target=change_target or None,
+                elapsed_ms=round((time.perf_counter() - start) * 1000.0, 3),
+                candidates=len(all_candidates),
+                change_candidates=len(change_candidates),
+                surviving_changes=len(surviving_changes),
+                selected=len(package.selected_files),
+                context_size=package.total_estimated_tokens,
+                budget=self._budget.max_tokens,
+            )
+        return package
+
+    def _collect_standard_candidates(self, query: str) -> dict:
+        """Share the standard pipeline (through candidate collection) so the
+        change-aware path and the standard path run identical
+        retrieval/dependency/architecture stages exactly once."""
+        intent = classify_intent(query)
+        symbol_matches = match_symbols(
+            query, self.root, index=None, symbol_index=self._symbol_index
+        )
+        symbol_paths = symbol_file_paths(symbol_matches)
+
+        arch_matches = ()
+        arch_direct_paths: set = set()
+        if getattr(self._arch_config, "enabled", False):
+            from repolens.architecture_retrieval import architecture_candidates
+
+            self._ensure_architecture()
+            arch_matches = architecture_candidates(
+                query,
+                self._arch_graph,
+                subsystems=self._arch_subsystems,
+                symbol_matches=symbol_matches,
+                config=self._arch_config,
+            )
+            arch_direct_paths = {
+                Path(candidate.path)
+                for candidate in arch_matches
+                if candidate.rank == 0
+            }
+
+        results = self._searcher.search(query, limit=self._primary_limit)
+        primary_meta = [
+            _retrieval_metadata(result, rank)
+            for rank, result in enumerate(results, start=1)
+        ]
+        primary_candidates = self._build_primary_candidates(
+            primary_meta, symbol_paths
+        )
+
+        eff_config = self._effective_expansion_config(intent)
+        combined_seeds = (
+            sorted(set(symbol_paths) | arch_direct_paths)
+            if (symbol_paths or arch_direct_paths)
+            else []
+        )
+        expansion_seeds = (
+            combined_seeds
+            if combined_seeds
+            else [candidate.path for candidate in primary_candidates]
+        )
+        dependency_nodes = expand_dependencies(
+            self._graph,
+            seeds=expansion_seeds,
+            config=eff_config,
+        )
+        dependency_candidates = self._build_dependency_candidates(dependency_nodes)
+        architecture_candidates_ctx = self._build_architecture_candidates(
+            arch_matches
+        )
+        return {
+            "intent": intent,
+            "symbol_matches": symbol_matches,
+            "primary": primary_candidates,
+            "dependency": dependency_candidates,
+            "architecture": architecture_candidates_ctx,
+        }
 
     def render(self, package: ContextPackage) -> str:
         """Render ``package`` to deterministic text for an agent."""

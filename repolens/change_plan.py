@@ -971,16 +971,46 @@ def plan_to_context_candidates(
     *,
     limit: int | None = None,
     include_tests: bool = True,
+    include_dependencies: bool = True,
+    include_callers: bool = True,
+    include_callees: bool = True,
+    include_architecture: bool = True,
 ) -> list[dict]:
     """Reusable helper converting a change plan into context-candidate dicts.
 
-    Additive and unused by ``get_context`` in this milestone.  M24.2 will
-    integrate change plans into context retrieval.  Output is ordered by
-    inspection priority and bounded by ``limit``.
+    Additive and unused by ``get_context``.  M24.2 integrates change plans
+    into context retrieval; the filtering flags let a caller disable whole
+    change-plan categories without touching normal retrieval.  Output is
+    ordered by inspection priority, bounded by ``limit``, and deterministic.
+
+    Each candidate dict carries ``path``, ``module``, ``symbol`` when known,
+    ``score``, ``category``, ``reason``, ``confidence``, ``relationship``, and
+    ``priority``.  The ``primary_target`` change-plan item is always retained;
+    the inspectable/enricher items are filtered through the ``include_*``
+    flags.  The original call surface (``include_tests`` only) is unchanged.
     """
     items = list(plan.inspection_order)
-    if not include_tests:
-        items = [i for i in items if i.category != PlanCategory.TEST]
+
+    def _keep(item: PlanItem) -> bool:
+        if item.category == PlanCategory.PRIMARY_TARGET:
+            return True
+        if item.category == PlanCategory.TEST or item.category == PlanCategory.INDIRECT_TEST:
+            return include_tests
+        if item.category in (PlanCategory.DIRECT_CALLER, PlanCategory.INDIRECT_CALLER):
+            return include_callers
+        if item.relationship in ("direct_callee", "indirect_callee"):
+            return include_callees
+        if item.category in (PlanCategory.DIRECT_DEPENDENCY, PlanCategory.INDIRECT_DEPENDENCY):
+            return include_dependencies
+        if item.category in (
+            PlanCategory.ARCHITECTURE_ENTRY,
+            PlanCategory.SUBSYSTEM_NEIGHBOR,
+            PlanCategory.BROADER_NEIGHBOR,
+        ):
+            return include_architecture
+        return True  # unknown/future categories are retained conservatively
+
+    items = [i for i in items if _keep(i)]
     if limit is not None:
         items = items[:limit]
     return [
@@ -988,6 +1018,7 @@ def plan_to_context_candidates(
             "path": item.path,
             "module": item.module,
             "symbol": item.symbol,
+            "score": item.score,
             "priority": item.priority,
             "category": item.category.value,
             "confidence": item.confidence.value,

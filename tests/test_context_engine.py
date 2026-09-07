@@ -567,3 +567,144 @@ def test_engine_render_includes_architecture_line() -> None:
     pkg = engine.build_context("checkout flow")
     text = render_context(pkg)
     assert "Architecture:" in text
+
+
+# ---------------------------------------------------------------------------
+# Change-aware engine (Milestone 24.2)
+# ---------------------------------------------------------------------------
+
+CHANGE_REPO = Path(__file__).parent / "fixtures" / "change_plan_repository"
+
+
+def _change_engine(root=CHANGE_REPO, **kwargs) -> ContextEngine:
+    kwargs.setdefault("budget", ContextBudget(max_tokens=10**9))
+    return ContextEngine(
+        root,
+        searcher=CodeSearcher(root),
+        dependency=DependencyExpansionConfig(depth=1),
+        **kwargs,
+    )
+
+
+def test_change_aware_build_keeps_standard_path_identical() -> None:
+    engine = _change_engine()
+    query = "how does checkout work"
+    via_dispatcher = engine.build_context(query)
+    via_standard = engine._build_context_standard(query)
+    assert via_dispatcher.to_dict() == via_standard.to_dict()
+
+
+def test_change_aware_build_adds_change_candidates() -> None:
+    engine = _change_engine()
+    pkg = engine.build_context(
+        "make checkout reject empty carts",
+        change_request="make checkout reject empty carts",
+        change_target="app/services/checkout.py",
+    )
+    assert pkg.change_candidates
+    change_paths = {c.path for c in pkg.change_candidates}
+    assert Path("app/services/checkout.py") in change_paths
+    for c in pkg.change_candidates:
+        assert c.change_category is not None
+        assert c.change_confidence is not None
+        assert c.change_priority is not None
+        assert c.inclusion_reason == "change_plan"
+    # Every surviving change file is part of the selected result.
+    assert change_paths <= {c.path for c in pkg.selected_files}
+
+
+def test_change_candidates_team_never_outrank_direct_matches() -> None:
+    engine = _change_engine()
+    pkg = engine.build_context(
+        "make checkout reject empty carts",
+        change_request="make checkout reject empty carts",
+        change_target="app/services/checkout.py",
+    )
+    change_paths = {c.path for c in pkg.change_candidates}
+    # Retrieval primaries always come first; change-plan files are a final tier.
+    role_order = [c.role for c in pkg.selected_files]
+    last_primary = max(
+        (i for i, r in enumerate(role_order) if r is CandidateRole.PRIMARY),
+        default=-1,
+    )
+    first_change = next(
+        (i for i, c in enumerate(pkg.selected_files) if c.path in change_paths),
+        None,
+    )
+    # The change plan may also revisit a primary (same file), which is fine;
+    # a *change-only* file must never outrank the primaries.
+    change_only_first = next(
+        (
+            i
+            for i, c in enumerate(pkg.selected_files)
+            if c.path in change_paths and c.role is not CandidateRole.PRIMARY
+        ),
+        None,
+    )
+    if change_only_first is not None:
+        assert last_primary < change_only_first
+
+
+def test_change_aware_dedupe_keeps_primary_role() -> None:
+    engine = _change_engine()
+    pkg = engine.build_context(
+        "make checkout reject empty carts",
+        change_request="make checkout reject empty carts",
+        change_target="app/services/checkout.py",
+    )
+    # A file that is both a retrieval primary and a change target appears once.
+    by_path = {c.path: c for c in pkg.selected_files}
+    checkout = by_path[Path("app/services/checkout.py")]
+    assert checkout.role is CandidateRole.PRIMARY
+
+
+def test_change_aware_change_candidates_survive_budget() -> None:
+    engine = _change_engine(budget=ContextBudget(max_tokens=2000))
+    pkg = engine.build_context(
+        "make checkout reject empty carts",
+        change_request="make checkout reject empty carts",
+        change_target="app/services/checkout.py",
+    )
+    assert 0 <= pkg.total_estimated_tokens <= 2000
+    assert pkg.change_candidates
+
+
+def test_change_aware_is_deterministic() -> None:
+    engine = _change_engine()
+    query = "make checkout reject empty carts"
+    a = engine.build_context(
+        query,
+        change_request=query,
+        change_target="app/services/checkout.py",
+    )
+    b = engine.build_context(
+        query,
+        change_request=query,
+        change_target="app/services/checkout.py",
+    )
+    assert a.to_dict() == b.to_dict()
+
+
+def test_change_plan_engine_method_reuses_context_components() -> None:
+    engine = _change_engine()
+    shared = engine.change_plan_engine()
+    assert shared._dep_graph is engine._graph
+    assert shared._symbol_index is engine._symbol_index
+    # A second read returns the same lazily-built engine.
+    assert engine.change_plan_engine() is shared
+
+
+def test_change_context_empty_repository(tmp_path: Path) -> None:
+    from repolens.mcp.change_plan_tool import ChangePlanState
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    engine = _change_engine(root=empty)
+    state = ChangePlanState(empty)
+    plan = state.default_engine.plan("add a feature")
+    pkg = engine.build_context(
+        "add a feature",
+        change_request="add a feature",
+        change_plan=plan,
+    )
+    assert pkg.change_candidates == ()

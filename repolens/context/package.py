@@ -27,6 +27,9 @@ class ContextPackage:
     excluded_candidates: tuple[ExcludedCandidate, ...] = ()
     intent: str | None = None
     matched_symbols: tuple[str, ...] = ()
+    #: Change-plan candidates that entered the final selection (M24.2).
+    #: Additive and defaulted, so existing packages are unaffected.
+    change_candidates: tuple[ContextCandidate, ...] = ()
 
     @property
     def total_estimated_tokens(self) -> int:
@@ -49,6 +52,11 @@ class ContextPackage:
             "dependency_candidates": [_candidate_dict(c) for c in self.dependency_candidates],
             "excluded_candidates": [_excluded_dict(c) for c in self.excluded_candidates],
         }
+        # Present only when the package carried change-plan candidates.
+        if self.change_candidates:
+            data["change_candidates"] = [
+                _candidate_dict(c) for c in self.change_candidates
+            ]
         return data
 
     def to_json(self, **json_kwargs) -> str:
@@ -73,6 +81,19 @@ def _candidate_dict(candidate: ContextCandidate) -> dict:
         d["architecture_rank"] = candidate.architecture_rank
     if candidate.architecture_metadata is not None:
         d["architecture_metadata"] = candidate.architecture_metadata
+    # Change-plan metadata (M24.2), included only when present so the default
+    # serialization is byte-for-byte unchanged.
+    for key, value in (
+        ("module", candidate.module),
+        ("symbol", candidate.symbol),
+        ("change_score", candidate.change_score),
+        ("change_category", candidate.change_category),
+        ("change_confidence", candidate.change_confidence),
+        ("change_relationship", candidate.change_relationship),
+        ("change_priority", candidate.change_priority),
+    ):
+        if value is not None:
+            d[key] = value
     return d
 
 

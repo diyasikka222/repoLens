@@ -219,6 +219,34 @@ def make_architecture_factory(root) -> Callable[..., "ArchitectureState"]:
     return factory
 
 
+def make_change_plan_factory(root) -> Callable[..., "ChangePlanState"]:
+    """Return a factory that lazily builds and caches the shared M24.2 state.
+
+    The root is validated eagerly (fail fast at startup); the incremental
+    index, the default :class:`ChangePlanEngine`, and every shared component
+    (dependency graph, symbol index, call graph, architecture graph,
+    subsystems, impact analyzer, searcher) are built on the first change-plan
+    tool call and reused by every subsequent call. Because the index build
+    shares the persistent cache with the other factories, no re-parsing occurs
+    when a warm index already exists.
+    """
+    from repolens.mcp.change_plan_tool import ChangePlanState
+
+    root = validate_repository_root(root)
+
+    lock = threading.Lock()
+    cache: list[ChangePlanState | None] = [None]
+
+    def factory(**kwargs) -> ChangePlanState:
+        if cache[0] is None:
+            with lock:
+                if cache[0] is None:
+                    cache[0] = ChangePlanState(root)
+        return cache[0]
+
+    return factory
+
+
 def run(argv: list[str] | None = None) -> None:
     """Run the MCP server to completion (blocks on the stdio loop)."""
     args = _parse_args(argv)
@@ -247,6 +275,7 @@ def run(argv: list[str] | None = None) -> None:
         impact_factory = make_impact_analyzer_factory(args.repo)
         inspect_factory = make_inspect_factory(args.repo)
         architecture_factory = make_architecture_factory(args.repo)
+        change_plan_factory = make_change_plan_factory(args.repo)
     except McpError as exc:
         _fatal(exc)
         return
@@ -258,6 +287,7 @@ def run(argv: list[str] | None = None) -> None:
         impact_factory=impact_factory,
         inspect_factory=inspect_factory,
         architecture_factory=architecture_factory,
+        change_plan_factory=change_plan_factory,
     )
 
     try:

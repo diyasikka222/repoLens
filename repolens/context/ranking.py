@@ -14,6 +14,22 @@ Dependency-expanded ranking policy (in order):
    before dependencies at equal distance),
 3. repository-relative path (alphabetical, tie-break).
 
+Change-plan-only ranking policy (Milestone 24.2). Candidates introduced
+exclusively by the change-plan layer (``inclusion_reason == "change_plan"``)
+form a final tier *below* every retrieval primary and every
+dependency-expanded/architecture candidate — change-plan signals never
+outrank direct query matches:
+
+1. tier 4 — strictly after all non-change tiers (0 direct match, 1 neighbor,
+   2 proximity, 3 generic/unranked dependency);
+2. change-plan inspection priority (lower inspection priority number first);
+3. repository-relative path (alphabetical, tie-break).
+
+A file that is both a retrieval/dependency/architecture candidate *and* a
+change-plan candidate keeps its higher tier: the engine deduplicates on first
+occurrence with primary/dependency/architecture candidates added before
+change-plan candidates.
+
 The ranking is a fixed, explainable policy. It is not learned and does not
 use an LLM, and it introduces no tunable coefficients.
 """
@@ -21,6 +37,7 @@ use an LLM, and it introduces no tunable coefficients.
 from __future__ import annotations
 
 from repolens.context.candidate import (
+    INCLUSION_CHANGE_PLAN,
     INCLUSION_SYMBOL_MATCH,
     CandidateRole,
     ContextCandidate,
@@ -47,6 +64,17 @@ def _candidate_key(candidate: ContextCandidate) -> tuple:
             primary_rank,
             symbol_boost,
             -score,
+            candidate.path.as_posix(),
+        )
+
+    # Change-plan-only candidates: the final, clearly-separated tier. They
+    # always sort below every dependency/architecture candidate (whose arch
+    # bucket is at most 3) and never above retrieval primaries.
+    if candidate.inclusion_reason == INCLUSION_CHANGE_PLAN:
+        return (
+            1,
+            4,
+            candidate.change_priority if candidate.change_priority is not None else 10**9,
             candidate.path.as_posix(),
         )
 

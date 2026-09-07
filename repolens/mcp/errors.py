@@ -54,5 +54,13 @@ class ArchitectureError(McpError):
     """Running an architecture-intelligence query failed (M23.3)."""
 
 
+class ChangePlanError(McpError):
+    """Producing a deterministic change plan failed (M24.2)."""
+
+
+class ChangeContextError(McpError):
+    """Building a change-aware context package failed (M24.2)."""
+
+
 class InternalError(McpError):
     """An unexpected internal failure (generic safe message)."""

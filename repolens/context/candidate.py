@@ -49,6 +49,12 @@ INCLUSION_CONFIGURATION = "configuration"
 #: backward-compatible; existing categories and behaviour are unchanged.
 INCLUSION_ARCHITECTURE = "architecture"
 
+#: Change-plan-driven inclusion category (Milestone 24.2). Additive:
+#: backward-compatible; existing categories and behaviour are unchanged.
+#: Candidates carrying this category were introduced by the change-plan layer
+#: and always rank below retrieval primaries and dependency-expanded files.
+INCLUSION_CHANGE_PLAN = "change_plan"
+
 
 @dataclass(frozen=True)
 class ContextCandidate:
@@ -77,6 +83,19 @@ class ContextCandidate:
     # and serialization paths are unaffected.
     architecture_rank: int | None = None
     architecture_metadata: dict | None = None
+
+    # Change-plan context metadata (Milestone 24.2). All additive and
+    # backward-compatible: defaulting to None leaves every existing
+    # construction site and serialization path unchanged. These fields carry
+    # the explainable change-plan signals for candidates introduced by the
+    # change-plan layer.
+    module: str | None = None
+    symbol: str | None = None
+    change_score: int | None = None
+    change_category: str | None = None
+    change_confidence: str | None = None
+    change_relationship: str | None = None
+    change_priority: int | None = None
 
 
 @dataclass(frozen=True)

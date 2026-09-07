@@ -35,6 +35,13 @@ from repolens.mcp.architecture_tool import (
     run_explain_architecture_match,
     run_inspect_architecture,
 )
+from repolens.mcp.change_plan_tool import (
+    ChangePlanFactory,
+    parse_change_context_arguments,
+    parse_change_plan_arguments,
+    run_change_context,
+    run_change_plan,
+)
 from repolens.mcp.errors import McpError
 from repolens.mcp.impact_tool import (
     ImpactFactory,
@@ -60,6 +67,8 @@ ARCHITECTURE_TOOL_NAME = "inspect_architecture"
 SUBSYSTEMS_TOOL_NAME = "discover_subsystems"
 CANDIDATES_TOOL_NAME = "architecture_candidates"
 EXPLAIN_ARCH_TOOL_NAME = "explain_architecture_match"
+CHANGE_PLAN_TOOL_NAME = "change_plan"
+CHANGE_CONTEXT_TOOL_NAME = "change_context"
 
 TOOL_DESCRIPTION = (
     "Search the repository and return a safe context package for the given "
@@ -152,6 +161,36 @@ EXPLAIN_ARCH_TOOL_DESCRIPTION = (
     "unsafe targets produce a safe validation error."
 )
 
+CHANGE_PLAN_TOOL_DESCRIPTION = (
+    "Produce a deterministic change plan for a change you want to make in the "
+    "repository. Accepts a natural-language change request (e.g. 'make "
+    "checkout reject empty carts'), and optionally an explicit target (a file "
+    "path, dotted module, package, or symbol name) and its kind.\n\n"
+    "Returns structured output: the request analysis/signals, the resolved "
+    "primary change target (with confidence and reasons), all target "
+    "candidates, the affected files and symbols, statically resolved callers "
+    "and callees, dependency and dependent groups, the architecture/subsystem "
+    "context, affected tests, a bounded deterministic inspection order, a "
+    "risk classification (low/medium/high) with risk factors, and statistics. "
+    "Bounded by max_targets (<=50), max_files (<=500), max_tests (<=100), and "
+    "max_depth (<=6). Deterministic; never modifies the repository."
+)
+
+CHANGE_CONTEXT_TOOL_DESCRIPTION = (
+    "Build a change-aware context package for a change you want to make. "
+    "Accepts the same change request and optional target as change_plan, plus "
+    "a context token budget, and folds the plan's affected files into the "
+    "existing ranking and budget pipeline (change-plan files form a final "
+    "inspection tier — they never outrank direct query matches).\n\n"
+    "Returns only firewall-cleared safe context: the selected files with "
+    "roles, decisions, selection reasons, and a deterministic per-file "
+    "explanation of change-plan provenance, plus blocked files, the compact "
+    "change plan (primary target, counts, risk, confidence, summary), and the "
+    "rendered safe context. Category flags (include_tests, "
+    "include_dependencies, include_callers, include_callees, "
+    "include_architecture) control which plan categories are folded in."
+)
+
 
 def build_mcp_server(
     engine_factory: EngineFactory,
@@ -160,6 +199,7 @@ def build_mcp_server(
     impact_factory: ImpactFactory | None = None,
     inspect_factory: InspectFactory | None = None,
     architecture_factory: ArchitectureFactory | None = None,
+    change_plan_factory: ChangePlanFactory | None = None,
     server_name: str = SERVER_NAME,
     server_version: str = SERVER_VERSION,
 ) -> MCPServer:
@@ -183,6 +223,10 @@ def build_mcp_server(
             registered (``inspect_architecture``, ``discover_subsystems``,
             ``architecture_candidates``, ``explain_architecture_match``).
             Independent of the other factories.
+        change_plan_factory: Optional callable returning the shared
+            :class:`~repolens.mcp.change_plan_tool.ChangePlanState`; when
+            provided, the additive M24.2 ``change_plan`` and ``change_context``
+            tools are registered. Independent of the other factories.
         server_name: MCP server name.
         server_version: MCP server version.
     """
@@ -316,6 +360,11 @@ def build_mcp_server(
     if architecture_factory is not None:
         _register_architecture_tools(server, architecture_factory)
 
+    if change_plan_factory is not None:
+        _register_change_plan_tools(
+            server, engine_factory, firewall, change_plan_factory
+        )
+
     return server
 
 
@@ -426,6 +475,107 @@ def _register_architecture_tools(server: MCPServer, architecture_factory: Archit
         explain_architecture_match,
         name=EXPLAIN_ARCH_TOOL_NAME,
         description=EXPLAIN_ARCH_TOOL_DESCRIPTION,
+    )
+
+
+def _register_change_plan_tools(
+    server: MCPServer,
+    engine_factory: EngineFactory,
+    firewall: ContextFirewall,
+    change_plan_factory: ChangePlanFactory,
+) -> None:
+    """Register the two additive M24.2 change-plan tools (unchanged core).
+
+    Each tool declares an explicit parameter signature so the MCP SDK derives
+    a precise input schema, and all values are validated by the tool-specific
+    ``parse_*`` function.
+    """
+    def _invoke(parse, run, **kwargs) -> types.CallToolResult:
+        try:
+            parsed = parse(dict(kwargs))
+        except McpError as exc:
+            _log_diagnostic(exc)
+            return _error_result(exc.safe_message)
+        try:
+            return run(**parsed)
+        except McpError as exc:
+            _log_diagnostic(exc)
+            return _error_result(exc.safe_message)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Unexpected failure in a change-plan tool: %s",
+                type(exc).__name__,
+            )
+            return _error_result(
+                "An unexpected internal error occurred while processing "
+                "the change-plan request."
+            )
+
+    def change_plan(
+        request: str,
+        target: str | None = None,
+        target_kind: str | None = None,
+        max_targets: int | None = None,
+        max_files: int | None = None,
+        max_tests: int | None = None,
+        max_depth: int | None = None,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_change_plan_arguments,
+            lambda **kw: run_change_plan(change_plan_factory, **kw),
+            request=request,
+            target=target,
+            target_kind=target_kind,
+            max_targets=max_targets,
+            max_files=max_files,
+            max_tests=max_tests,
+            max_depth=max_depth,
+        )
+
+    def change_context(
+        request: str,
+        target: str | None = None,
+        target_kind: str | None = None,
+        max_tokens: int | None = None,
+        max_targets: int | None = None,
+        max_files: int | None = None,
+        max_tests: int | None = None,
+        max_depth: int | None = None,
+        include_tests: bool | None = None,
+        include_dependencies: bool | None = None,
+        include_callers: bool | None = None,
+        include_callees: bool | None = None,
+        include_architecture: bool | None = None,
+    ) -> types.CallToolResult:
+        return _invoke(
+            parse_change_context_arguments,
+            lambda **kw: run_change_context(
+                engine_factory, firewall, change_plan_factory, **kw
+            ),
+            request=request,
+            target=target,
+            target_kind=target_kind,
+            max_tokens=max_tokens,
+            max_targets=max_targets,
+            max_files=max_files,
+            max_tests=max_tests,
+            max_depth=max_depth,
+            include_tests=include_tests,
+            include_dependencies=include_dependencies,
+            include_callers=include_callers,
+            include_callees=include_callees,
+            include_architecture=include_architecture,
+        )
+
+    server.add_tool(
+        change_plan,
+        name=CHANGE_PLAN_TOOL_NAME,
+        description=CHANGE_PLAN_TOOL_DESCRIPTION,
+    )
+    server.add_tool(
+        change_context,
+        name=CHANGE_CONTEXT_TOOL_NAME,
+        description=CHANGE_CONTEXT_TOOL_DESCRIPTION,
     )
 
 

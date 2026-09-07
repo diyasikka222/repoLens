@@ -433,3 +433,135 @@ def test_plan_to_context_candidates_prioritized() -> None:
     candidates = plan_to_context_candidates(plan)
     priorities = [c["priority"] for c in candidates]
     assert priorities == sorted(priorities)
+
+
+# ---------------------------------------------------------------------------
+# Change-aware bridge (Milestone 24.2): plan -> ContextCandidate
+# ---------------------------------------------------------------------------
+
+
+def _change_candidates(plan, **kwargs):
+    from repolens.change_context import ChangeContextOptions, plan_to_change_candidates
+
+    return plan_to_change_candidates(
+        plan,
+        options=ChangeContextOptions(**kwargs),
+        root=ROOT,
+    )
+
+
+def test_plan_to_change_candidates_basic() -> None:
+    from repolens.change_context import plan_to_change_candidates
+
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    candidates = plan_to_change_candidates(plan, root=ROOT)
+    assert candidates
+    first = candidates[0]
+    assert first.path == Path("app/services/checkout.py")
+    assert first.change_category == "primary_target"
+    assert first.change_priority == 1
+    assert first.change_confidence == "confirmed"
+    assert first.inclusion_reason == "change_plan"
+    order = [c.change_priority for c in candidates]
+    assert order == sorted(order)
+
+
+def test_plan_to_change_candidates_max_files() -> None:
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    candidates = _change_candidates(plan, max_files=5)
+    assert len(candidates) <= 5
+
+
+def test_plan_to_change_candidates_include_tests() -> None:
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    with_tests = _change_candidates(plan, include_tests=True)
+    without = _change_candidates(plan, include_tests=False)
+    # Test-only files are introduced with tests enabled and dropped otherwise.
+    assert any(c.path == Path("tests/test_checkout.py") for c in with_tests)
+    assert any(c.path == Path("tests/test_payments.py") for c in with_tests)
+    assert all(c.path != Path("tests/test_checkout.py") for c in without)
+    assert all(c.path != Path("tests/test_payments.py") for c in without)
+    # tests/test_refunds.py also imports the refunds service, so it survives
+    # through the dependency relationship even when tests are filtered out.
+    assert any(c.path == Path("tests/test_refunds.py") for c in without)
+
+
+def test_plan_to_change_candidates_include_callers() -> None:
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    with_callers = _change_candidates(plan, include_callers=True)
+    without = _change_candidates(plan, include_callers=False)
+    caller_paths = {c.path for c in with_callers if c.change_category == "direct_caller"}
+    assert caller_paths
+    assert all(c.change_category != "direct_caller" for c in without)
+
+
+def test_plan_to_change_candidates_include_dependencies() -> None:
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    with_deps = _change_candidates(plan, include_dependencies=True)
+    without = _change_candidates(plan, include_dependencies=False)
+    dep_paths = {
+        c.path for c in with_deps if c.change_category == "direct_dependency"
+    }
+    assert dep_paths
+    assert all(c.change_category != "direct_dependency" for c in without)
+
+
+def test_plan_to_change_candidates_skips_missing_files(tmp_path: Path) -> None:
+    from repolens.change_context import plan_to_change_candidates
+
+    import shutil
+
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT, repo)
+    (repo / "app" / "services" / "checkout.py").unlink()
+    plan = ChangePlanEngine(repo).plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    candidates = plan_to_change_candidates(plan, root=repo)
+    assert all(c.path != Path("app/services/checkout.py") for c in candidates)
+
+
+def test_plan_response_payload_structure() -> None:
+    from repolens.change_context import plan_response_payload
+
+    plan = _engine().plan("Add refund support to checkout")
+    payload = plan_response_payload(plan, "Add refund support to checkout")
+    assert payload["request"] == "Add refund support to checkout"
+    assert payload["deterministic"] is True
+    assert payload["primary_target"]
+    assert isinstance(payload["affected_files"], list)
+    assert isinstance(payload["risk"], str)
+    assert isinstance(payload["statistics"], dict)
+    assert set(payload) == {
+        "request", "analysis", "primary_target", "target_candidates",
+        "affected_files", "affected_symbols", "callers", "callees",
+        "dependencies", "dependents", "architecture", "tests",
+        "inspection_order", "risk", "risk_factors", "confidence",
+        "summary", "statistics", "deterministic",
+    }
+    json.dumps(payload)  # JSON-safe
+
+
+def test_explain_change_context_deterministic() -> None:
+    from repolens.change_context import explain_change_context
+
+    plan = _engine().plan(
+        "make checkout reject empty carts", target="app/services/checkout.py"
+    )
+    first = explain_change_context(plan, None, "app/services/checkout.py")
+    second = explain_change_context(plan, None, "app/services/checkout.py")
+    assert first == second
+    assert first["in_plan"] is True
+    assert first["category"] == "primary_target"
+    assert first["target"] == "app/services/checkout.py"
+    assert first["selected"] is False

@@ -11,9 +11,9 @@ call graph, architecture graph, subsystem discovery, impact analyzer, and
 lexical search. Nothing is reparsed and no second repository scan exists.
 
 M24.1 is engine-only. Integration with the MCP server is Milestone 24.2
-(`change_plan` tool). A small additive helper —
-`plan_to_context_candidates` — is provided now so M24.2 can wire plans into
-context retrieval without touching `get_context`.
+(`change_plan` and `change_context` tools, plus the change-aware
+`ContextEngine` mode). A small additive helper — `plan_to_context_candidates` —
+is provided so the plan layer can be reused without touching `get_context`.
 
 ## Quick start
 
@@ -186,6 +186,16 @@ cands = plan_to_context_candidates(plan, limit=8, include_tests=True)
 It is inert today — `get_context` does not use it — so adding it changes
 nothing about existing retrieval behavior.
 
+## `change_context`
+
+Milestone 24.2 wires plans into the MCP layer. The `change_context` MCP tool
+(and the `ContextEngine.build_context(..., change_request=..., ...)` mode it
+drives) folds the plan from the change-plan layer into the existing retrieval
+pipeline as a clearly-separated, final-ranking candidate tier — see
+[`docs/change-context.md`](change-context.md) for the full contract, the
+`change_plan` and `change_context` tools, filtering options, and the
+`change_context` helper module.
+
 ## Worked example
 
 Fixture: `tests/fixtures/change_plan_repository` (an `app/` package with
@@ -232,7 +242,8 @@ assert "tests/test_refunds.py" in {t.path for t in plan.tests}
 
 ## Scope outside M24.1
 
-- MCP `change_plan` tool wiring (M24.2).
+- MCP `change_plan` / `change_context` tool wiring and change-aware context
+  building (M24.2) — see `docs/change-context.md`.
 - Editing / patch generation, test-run triggering, and any kind of code
   synthesis (explicitly out of scope: the engine plans *where* and *in what
   order* to act; it never acts).
