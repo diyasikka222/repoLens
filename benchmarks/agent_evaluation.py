@@ -1,8 +1,8 @@
-"""Deterministic agent-task evaluation benchmark (P25.2).
+"""Deterministic agent-task evaluation benchmark (P25.2–P25.3).
 
-Scores how much of each realistic repository-level coding task's expected
-surface (files, symbols, tests) each RepoLens strategy makes available to an
-agent, fully offline and deterministically.
+Scores how much of each realistic repository-level coding task's surface
+(files, symbols, tests) each RepoLens strategy makes available to an agent,
+fully offline and deterministically.
 
 Evaluated strategies:
 
@@ -16,15 +16,26 @@ Evaluated strategies:
 - ``change_context`` — change-aware context (plan folded into the same package
   pipeline).
 
-The corpus targets the real RepoLens repository: every expected file is a file
-in this repository, every expected symbol a real definition in it. Metrics are
-mean/median precision, recall and F1 per strategy, average selected files,
-average context size (tokens), and per-case failures. No flaky timing
-assertions; latency is reported for information only.
+The corpus targets the real RepoLens repository: every file in a task surface
+is a real file, every required symbol a real definition. Criteria are split by
+objective:
+
+- **Retrieval coverage** (lexical / candidate-semantic / hybrid) is scored on
+  precision, recall and F1 against the required surface;
+- **Agent context usefulness** (context / change_context) is scored on graded
+  required/supporting/test coverage plus package efficiency (selected files,
+  irrelevant files, context tokens, tokens per required file).
+
+These are different objectives and are not a single leaderboard.
+
+Task-level ``--diagnostics`` output lists every context case that missed at
+least one required file (task id, strategy, missed/supporting/irrelevant files,
+context tokens). The normal output stays concise and deterministic.
 
 Usage::
 
     python benchmarks/agent_evaluation.py
+    python benchmarks/agent_evaluation.py --diagnostics
 """
 
 from __future__ import annotations
@@ -37,9 +48,11 @@ from pathlib import Path
 from typing import Callable
 
 from repolens.agent_evaluation import (
+    ContextEfficiencyResult,
     EvaluationTask,
     AgentEvaluationRunner,
     CandidateSet,
+    EvaluationCase,
     EvaluationReport,
     produce_change_context_candidate_set,
     produce_context_candidate_set,
@@ -74,7 +87,13 @@ CONTEXT_STRATEGIES = ("context", "change_context")
 
 
 def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
-    """Deterministic tasks describing realistic work on the real repository."""
+    """Deterministic tasks describing realistic work on the real repository.
+
+    Each task declines its surface into *required* files/symbols (a correct
+    edit touches them), *supporting* files (useful surrounding context), and
+    *expected tests*. Surfaces are disjoint within a task and reference only
+    real repository files and definitions.
+    """
     del root
     return (
         EvaluationTask(
@@ -86,9 +105,11 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "positives on that symbol. Fix the scoring so import and source "
                 "tokens still influence the ranking."
             ),
-            expected_relevant_files=("repolens/search.py",),
+            required_files=("repolens/search.py",),
+            supporting_files=("repolens/parser.py",),
+            expected_tests=("tests/test_search.py",),
             target_files=("repolens/search.py",),
-            expected_relevant_symbols=("CodeSearcher", "_score"),
+            required_symbols=("CodeSearcher", "_score"),
             category="bug_fix",
         ),
         EvaluationTask(
@@ -99,14 +120,17 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "semantic search and evaluation layers, and update the consumers "
                 "so the whole retrieval stack stays consistent."
             ),
-            expected_relevant_files=(
+            required_files=(
                 "repolens/search.py",
                 "repolens/semantic_search.py",
-                "repolens/evaluation.py",
+            ),
+            supporting_files=("repolens/retrieval.py", "repolens/evaluation.py"),
+            expected_tests=(
+                "tests/test_search.py",
+                "tests/test_semantic_search.py",
             ),
             target_files=("repolens/search.py",),
-            expected_relevant_symbols=("SearchResult", "SemanticResult"),
-            expected_tests=("tests/test_search.py",),
+            required_symbols=("SearchResult", "SemanticResult"),
             category="cross_file_change",
         ),
         EvaluationTask(
@@ -117,12 +141,17 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "context budget in tokens, and thread it through the context "
                 "engine so packages respect it."
             ),
-            expected_relevant_files=(
+            required_files=(
                 "repolens/context/config.py",
                 "repolens/context/engine.py",
             ),
+            supporting_files=(
+                "repolens/context/package.py",
+                "repolens/context/budget.py",
+            ),
+            expected_tests=("tests/test_context_engine.py",),
             target_files=("repolens/context/config.py",),
-            expected_relevant_symbols=("ContextBudget", "ContextEngine"),
+            required_symbols=("ContextBudget", "ContextEngine"),
             category="feature_change",
         ),
         EvaluationTask(
@@ -133,12 +162,17 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "are ranked in a separate, explicit stage instead of being mixed "
                 "into the primary ranking."
             ),
-            expected_relevant_files=(
+            required_files=(
                 "repolens/context/engine.py",
                 "repolens/context/ranking.py",
             ),
+            supporting_files=(
+                "repolens/context/candidate.py",
+                "repolens/context/expansion.py",
+            ),
+            expected_tests=("tests/test_context_engine.py",),
             target_files=("repolens/context/engine.py",),
-            expected_relevant_symbols=("ContextEngine", "rank_candidates"),
+            required_symbols=("ContextEngine", "rank_candidates"),
             category="refactor",
         ),
         EvaluationTask(
@@ -149,12 +183,14 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "an explicit risk indicator, and keep the JSON response "
                 "deterministic and bounded."
             ),
-            expected_relevant_files=(
+            required_files=(
                 "repolens/mcp/change_plan_tool.py",
                 "repolens/change_plan.py",
             ),
+            supporting_files=("repolens/change_context.py", "repolens/mcp/server.py"),
+            expected_tests=("tests/test_mcp_change_plan.py",),
             target_files=("repolens/mcp/change_plan_tool.py",),
-            expected_relevant_symbols=("run_change_plan", "ChangePlanEngine"),
+            required_symbols=("run_change_plan", "ChangePlanEngine", "ChangePlanState"),
             category="feature_change",
         ),
         EvaluationTask(
@@ -165,11 +201,20 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "items into context candidates so the mapping is easier to reason "
                 "about and test."
             ),
-            expected_relevant_files=("repolens/change_context.py",),
+            required_files=("repolens/change_context.py",),
+            supporting_files=(
+                "repolens/context/candidate.py",
+                "repolens/context/engine.py",
+            ),
+            expected_tests=(
+                "tests/test_change_plan.py",
+                "tests/test_mcp_change_plan.py",
+            ),
             target_files=("repolens/change_context.py",),
-            expected_relevant_symbols=(
+            required_symbols=(
                 "plan_to_change_candidates",
                 "merge_change_candidates",
+                "explain_change_context",
             ),
             category="refactor",
         ),
@@ -180,9 +225,11 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "Add unit tests covering the RRF fusion strategy of the hybrid "
                 "searcher in the retrieval module."
             ),
-            expected_relevant_files=("tests/test_retrieval.py",),
-            expected_relevant_symbols=("HybridSearcher",),
+            required_files=("tests/test_retrieval.py",),
+            supporting_files=("repolens/retrieval.py",),
             expected_tests=("tests/test_retrieval.py",),
+            target_files=("tests/test_retrieval.py",),
+            required_symbols=(),
             category="test_change",
         ),
         EvaluationTask(
@@ -193,11 +240,14 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "when architecture signals tie, so repeated queries return the "
                 "same ranked surface."
             ),
-            expected_relevant_files=("repolens/architecture_retrieval.py",),
+            required_files=("repolens/architecture_retrieval.py",),
+            supporting_files=("repolens/architecture.py",),
+            expected_tests=("tests/test_architecture_retrieval.py",),
             target_files=("repolens/architecture_retrieval.py",),
-            expected_relevant_symbols=(
+            required_symbols=(
                 "extract_architecture_signals",
                 "ArchitectureRetrievalConfig",
+                "ArchitectureCandidate",
             ),
             category="bug_fix",
         ),
@@ -208,9 +258,11 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "Fix the incremental index so entries for files that were removed "
                 "after a rebuild are pruned and never resurface."
             ),
-            expected_relevant_files=("repolens/incremental_index.py",),
+            required_files=("repolens/incremental_index.py",),
+            supporting_files=("repolens/atomic_write.py", "repolens/index.py"),
+            expected_tests=("tests/test_incremental_index.py",),
             target_files=("repolens/incremental_index.py",),
-            expected_relevant_symbols=("IncrementalIndexBuilder", "_prune_stale"),
+            required_symbols=("IncrementalIndexBuilder", "_prune_stale", "AnalysisCache"),
             category="bug_fix",
         ),
         EvaluationTask(
@@ -220,9 +272,14 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
                 "Fix dependency expansion so a dependency cycle between two files "
                 "cannot loop or duplicate expanded candidates."
             ),
-            expected_relevant_files=("repolens/context/expansion.py",),
+            required_files=("repolens/context/expansion.py",),
+            supporting_files=(
+                "repolens/graph.py",
+                "repolens/context/engine.py",
+            ),
+            expected_tests=("tests/test_context_engine.py",),
             target_files=("repolens/context/expansion.py",),
-            expected_relevant_symbols=("expand_dependencies", "ExpandedNode"),
+            required_symbols=("expand_dependencies", "ExpandedNode"),
             category="bug_fix",
         ),
     )
@@ -231,7 +288,13 @@ def build_corpus(root: Path) -> tuple[EvaluationTask, ...]:
 def _validate_corpus(root: Path, tasks: tuple[EvaluationTask, ...]) -> None:
     missing: list[str] = []
     for task in tasks:
-        for path in (*task.expected_relevant_files, *task.expected_tests, *task.target_files):
+        surface = (
+            *task.required_files_effective,
+            *task.supporting_files,
+            *task.expected_tests,
+            *task.target_files,
+        )
+        for path in surface:
             if not (root / path).is_file():
                 missing.append(f"{task.id}: {path}")
     if missing:
@@ -341,11 +404,10 @@ def run_benchmark(
     producers = _Producers(env, root)
     runner = AgentEvaluationRunner(max_candidates=max_candidates)
 
-    results = []
+    cases: list[EvaluationCase] = []
     failures: list[dict] = []
     for task in tasks:
         for strategy in strategies:
-            started = time.perf_counter()
             try:
                 candidate = producers.make(strategy)(task)
             except Exception as exc:  # pragma: no cover - defensive, deterministic
@@ -357,16 +419,13 @@ def run_benchmark(
                     }
                 )
                 continue
-            candidate = CandidateSet(
-                strategy=strategy,
-                retrieved_files=candidate.retrieved_files,
-                matched_symbols=candidate.matched_symbols,
-                context_size_tokens=candidate.context_size_tokens,
-                selected_file_count=candidate.selected_file_count,
-                latency_seconds=time.perf_counter() - started,
-            )
-            results.append(runner.evaluate(task, candidate))
-    return EvaluationReport(results=tuple(results), failures=tuple(failures))
+            cases.append(EvaluationCase(task=task, candidate_set=candidate))
+    report = runner.run(cases)
+    return EvaluationReport(
+        results=report.results,
+        efficiency=report.efficiency,
+        failures=tuple(failures),
+    )
 
 
 def print_report(report: EvaluationReport) -> None:
@@ -375,8 +434,11 @@ def print_report(report: EvaluationReport) -> None:
           f"({report.num_cases // max(len(report.strategies()), 1)} tasks x "
           f"{len(report.strategies())} strategies), deterministic offline")
     print()
-    print("-- Retrieval coverage (objective: maximize coverage of the expected ")
-    print("   task surface; scored with precision / recall / F1) --")
+    print("------------------------------------------")
+    print("Retrieval coverage")
+    print("(objective: maximize coverage of the required task surface;")
+    print(" scored with precision / recall / F1)")
+    print("------------------------------------------")
     for strategy in RETRIEVAL_STRATEGIES:
         summary = report.strategy_summary(strategy)
         print(f"- {strategy}: "
@@ -392,17 +454,21 @@ def print_report(report: EvaluationReport) -> None:
               f"| tasks={summary['task_count']} "
               f"failures={len(summary['failures'])}")
     print()
-    print("-- Agent context efficiency (objective: minimal selected context that ")
-    print("   covers the required files; sized by recall, files and tokens) --")
+    print("------------------------------------------")
+    print("Agent context usefulness")
+    print("(objective: minimal selected context that covers the required files;")
+    print(" scored on graded required/supporting/test coverage and package size)")
+    print("------------------------------------------")
     for strategy in CONTEXT_STRATEGIES:
-        summary = report.strategy_summary(strategy)
+        summary = report.efficiency_summary(strategy)
         print(f"- {strategy}: "
-              f"required-file recall={summary['recall']['mean']:.3f} "
-              f"selected={summary['mean_selected_files']:.2f} "
+              f"required-file recall={summary['mean_required_file_recall']:.3f} "
+              f"supporting-file recall={summary['mean_supporting_file_recall']:.3f} "
+              f"test recall={summary['mean_test_recall']:.3f} "
+              f"selected={summary['mean_selected_file_count']:.2f} "
+              f"irrelevant={summary['mean_irrelevant_selected_file_count']:.2f} "
               f"context_tokens={summary['mean_context_size_tokens']:.0f} "
-              f"irrelevant={summary['mean_irrelevant_files']:.2f} "
-              f"tokens_per_relevant={summary['mean_tokens_per_relevant_file']:.0f} "
-              f"latency={summary['mean_latency_seconds']:.3f}s "
+              f"tokens_per_required={summary['mean_tokens_per_required_file']:.0f} "
               f"| tasks={summary['task_count']} "
               f"failures={len(summary['failures'])}")
     print()
@@ -413,7 +479,38 @@ def print_report(report: EvaluationReport) -> None:
         print(f"- FAILURE {failure['task_id']}/{failure['strategy']}: {failure['error']}")
 
 
-def main() -> int:
+def weak_context_cases(
+    report: EvaluationReport, strategies: tuple[str, ...] = CONTEXT_STRATEGIES
+) -> tuple[ContextEfficiencyResult, ...]:
+    """Every context-strategy case that missed at least one required file (weak)."""
+    return tuple(
+        result
+        for strategy in strategies
+        for result in report.efficiency_for_strategy(strategy)
+        if result.is_weak
+    )
+
+
+def print_diagnostics(report: EvaluationReport) -> None:
+    """Task-level details for weak context cases; never dumps source content."""
+    cases = weak_context_cases(report)
+    print(f"task-level diagnostics: {len(cases)} weak context case(s) "
+          f"(required-file recall < 1.0); no source content is dumped")
+    for result in cases:
+        missed = ",".join(result.required_files_missed) or "-"
+        supporting = ",".join(result.supporting_files_selected) or "-"
+        irrelevant = ",".join(result.irrelevant_files_selected) or "-"
+        print(f"- {result.task_id}[{result.strategy}]: "
+              f"required_missed={{{missed}}} "
+              f"supporting_selected={{{supporting}}} "
+              f"irrelevant_selected={{{irrelevant}}} "
+              f"context_tokens={result.context_size_tokens}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    show_diagnostics = "--diagnostics" in argv
     with tempfile.TemporaryDirectory(prefix="replens-agenteval-") as cache_dir:
         os.environ["REPOLENS_CACHE_DIR"] = cache_dir
         started = time.perf_counter()
@@ -421,6 +518,8 @@ def main() -> int:
         report = run_benchmark(tasks, REPO_ROOT)
         elapsed = time.perf_counter() - started
         print_report(report)
+        if show_diagnostics:
+            print_diagnostics(report)
         print(f"agent-evaluation benchmark finished in {elapsed:.2f}s")
         if report.failures:
             print("WARNING: some strategy/task combinations failed")

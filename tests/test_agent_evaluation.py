@@ -1,10 +1,17 @@
-"""Unit and integration tests for P25.2 agent-task evaluation (repolens/agent_evaluation.py).
+"""Unit and integration tests for deterministic agent-task evaluation
+(repolens/agent_evaluation.py, P25.2–P25.3).
 
-Unit tests cover the metric math and validation of the pure (task, candidate
-set) → result pipeline: perfect/partial/zero-relevant/irrelevant-only/duplicate/
-empty-surface cases, determinism across repeated runs, JSON serialization, and
-bounded result handling. Integration tests exercise the benchmark's task corpus
-and producer wiring against the real repository (lexical search on a subset).
+Unit tests cover:
+
+- the P25.2 metric math and validation of the pure (task, candidate set) →
+  result pipeline: perfect/partial/zero-relevant/irrelevant-only/duplicate/
+  empty-surface cases, determinism, JSON serialization, bounded results;
+- the P25.3 graded context-usefulness model: required vs supporting vs test
+  coverage, tokens per required file, empty/missing/irrelevant/duplicate
+  surfaces, and backward compatibility of legacy task construction.
+
+Integration tests exercise the benchmark's task corpus, producer wiring and
+diagnostics against the real repository (lexical search on a subset).
 """
 
 from __future__ import annotations
@@ -313,6 +320,271 @@ class RunnerCaseTests(unittest.TestCase):
         self.assertEqual(decoded["results"][0]["task_id"], "t1")
 
 
+class ContextEfficiencyTests(unittest.TestCase):
+    """P25.3 graded context-usefulness metrics."""
+
+    def setUp(self) -> None:
+        self.runner = agent_eval.AgentEvaluationRunner()
+
+    def _task(
+        self,
+        required: tuple[str, ...] = ("a.py",),
+        supporting: tuple[str, ...] = (),
+        tests: tuple[str, ...] = (),
+        symbols: tuple[str, ...] = (),
+        **overrides,
+    ) -> agent_eval.EvaluationTask:
+        return agent_eval.EvaluationTask(
+            id="ce",
+            title="ctx task",
+            request="ctx task request",
+            required_files=required,
+            supporting_files=supporting,
+            expected_tests=tests,
+            required_symbols=symbols,
+            **overrides,
+        )
+
+    def test_required_vs_supporting_coverage(self) -> None:
+        task = self._task(
+            required=("a.py",),
+            supporting=("b.py",),
+            tests=("tests/test_a.py",),
+        )
+        eff = self.runner.context_efficiency(
+            task,
+            _candidate(("b.py", "tests/test_a.py", "zz.py"), strategy="context"),
+        )
+        self.assertAlmostEqual(eff.required_file_recall, 0.0)
+        self.assertAlmostEqual(eff.supporting_file_recall, 1.0)
+        self.assertAlmostEqual(eff.test_recall, 1.0)
+        self.assertEqual(eff.relevant_selected_file_count, 2)
+        self.assertEqual(eff.irrelevant_selected_file_count, 1)
+        self.assertEqual(eff.required_files_missed, ("a.py",))
+        self.assertEqual(eff.supporting_files_selected, ("b.py",))
+        self.assertEqual(eff.irrelevant_files_selected, ("zz.py",))
+
+    def test_required_file_recall(self) -> None:
+        task = self._task(required=("a.py", "b.py"))
+        eff = self.runner.context_efficiency(task, _candidate(("a.py",)))
+        self.assertAlmostEqual(eff.required_file_recall, 0.5)
+
+    def test_supporting_file_recall_empty_and_partial(self) -> None:
+        task = self._task(supporting=("b.py", "c.py"))
+        eff = self.runner.context_efficiency(task, _candidate(("b.py",)))
+        self.assertAlmostEqual(eff.supporting_file_recall, 0.5)
+        empty = self._task(supporting=(), required=("a.py",))
+        eff0 = self.runner.context_efficiency(empty, _candidate(("a.py",)))
+        self.assertEqual(eff0.supporting_file_recall, 0.0)
+
+    def test_test_recall_empty_and_partial(self) -> None:
+        task = self._task(tests=("tests/t1.py", "tests/t2.py"))
+        eff = self.runner.context_efficiency(task, _candidate(("tests/t1.py",)))
+        self.assertAlmostEqual(eff.test_recall, 0.5)
+        empty = self._task(tests=())
+        eff0 = self.runner.context_efficiency(empty, _candidate(("a.py",)))
+        self.assertEqual(eff0.test_recall, 0.0)
+
+    def test_tokens_per_required_file(self) -> None:
+        task = self._task(required=("a.py", "b.py"))
+        eff = self.runner.context_efficiency(
+            task, _candidate(("a.py", "b.py"), context_size=400)
+        )
+        self.assertAlmostEqual(eff.tokens_per_required_file, 200.0)
+        none_retrieved = self.runner.context_efficiency(
+            task, _candidate(("c.py",), context_size=400)
+        )
+        self.assertEqual(none_retrieved.tokens_per_required_file, 0.0)
+        none_size = self.runner.context_efficiency(
+            task, _candidate(("a.py", "b.py"), context_size=None)
+        )
+        self.assertEqual(none_size.tokens_per_required_file, 0.0)
+
+    def test_empty_required_surface_is_valid(self) -> None:
+        task = self._task(required=(), supporting=())
+        eff = self.runner.context_efficiency(task, _candidate(("x.py",)))
+        self.assertEqual(eff.required_file_recall, 0.0)
+        self.assertEqual(eff.required_files_missed, ())
+        self.assertEqual(eff.tokens_per_required_file, 0.0)
+        self.assertEqual(eff.irrelevant_selected_file_count, 1)
+
+    def test_missing_required_files_sorted(self) -> None:
+        task = self._task(required=("c.py", "a.py", "b.py"))
+        eff = self.runner.context_efficiency(task, _candidate(("a.py",)))
+        self.assertEqual(eff.required_files_missed, ("b.py", "c.py"))
+        self.assertEqual(eff.relevant_selected_file_count, 1)
+
+    def test_selected_relevant_and_irrelevant_counts(self) -> None:
+        task = self._task(required=("a.py",), supporting=("s.py",))
+        eff = self.runner.context_efficiency(
+            task, _candidate(("a.py", "s.py", "zz.py", "yy.py"))
+        )
+        self.assertEqual(eff.relevant_selected_file_count, 2)
+        self.assertEqual(eff.irrelevant_selected_file_count, 2)
+        self.assertEqual(eff.irrelevant_files_selected, ("zz.py", "yy.py"))
+        self.assertEqual(eff.selected_file_count, 4)
+
+    def test_selected_file_count_passthrough(self) -> None:
+        task = self._task(required=("a.py",))
+        eff = self.runner.context_efficiency(
+            task, _candidate(("a.py", "b.py"), selected=9)
+        )
+        self.assertEqual(eff.selected_file_count, 9)
+
+    def test_duplicate_surfaces_deduped(self) -> None:
+        task = self._task(required=("a.py", "a.py", "b.py"))
+        self.assertEqual(task.required_files, ("a.py", "b.py"))
+        eff = self.runner.context_efficiency(task, _candidate(("a.py", "a.py")))
+        self.assertAlmostEqual(eff.required_file_recall, 0.5)
+        self.assertEqual(eff.irrelevant_selected_file_count, 0)
+
+    def test_overlapping_required_supporting_fails(self) -> None:
+        with self.assertRaises(ValueError):
+            agent_eval.EvaluationTask(
+                id="o1", title="overlap", request="r",
+                required_files=("a.py",), supporting_files=("a.py",),
+            )
+        with self.assertRaises(ValueError):
+            agent_eval.EvaluationTask(
+                id="o2", title="legacy overlap", request="r",
+                expected_relevant_files=("a.py",), supporting_files=("a.py",),
+            )
+
+    def test_new_surface_fields_validate_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            self._task(required=("/abs.py",))
+        with self.assertRaises(ValueError):
+            self._task(supporting=("a/../b.py",))
+        with self.assertRaises(ValueError):
+            self._task(tests=("",))
+
+    def test_weak_case_detection(self) -> None:
+        covered = self._task(required=("a.py",))
+        strong = self.runner.context_efficiency(covered, _candidate(("a.py",)))
+        weak = self.runner.context_efficiency(covered, _candidate(("b.py",)))
+        self.assertFalse(strong.is_weak)
+        self.assertTrue(weak.is_weak)
+
+    def test_efficiency_json_serialization(self) -> None:
+        task = self._task(required=("a.py",), supporting=("s.py",), tests=("tests/t.py",))
+        eff = self.runner.context_efficiency(
+            task, _candidate(("a.py", "s.py"), context_size=100)
+        )
+        decoded = json.loads(json.dumps(eff.to_dict()))
+        self.assertEqual(decoded["required_file_recall"], 1.0)
+        self.assertEqual(decoded["supporting_file_recall"], 1.0)
+        self.assertEqual(decoded["tokens_per_required_file"], 100.0)
+
+
+class BackwardCompatibilityTests(unittest.TestCase):
+    """P25.2 task definitions must keep working unchanged."""
+
+    def test_legacy_task_construction(self) -> None:
+        task = _task(
+            files=("a.py", "b.py"),
+            expected_relevant_symbols=("S",),
+            expected_tests=("tests/test_a.py",),
+        )
+        self.assertEqual(task.required_files_effective, ("a.py", "b.py"))
+        self.assertEqual(task.required_symbols_effective, ("S",))
+        self.assertEqual(task.supporting_files, ())
+        self.assertEqual(task.expected_tests, ("tests/test_a.py",))
+
+    def test_legacy_positional_construction(self) -> None:
+        task = agent_eval.EvaluationTask("id1", "title", "request", ("a.py",))
+        self.assertEqual(task.id, "id1")
+        self.assertEqual(task.required_files_effective, ("a.py",))
+
+    def test_merge_legacy_and_new_surfaces_deterministically(self) -> None:
+        task = agent_eval.EvaluationTask(
+            id="m",
+            title="t",
+            request="r",
+            expected_relevant_files=("a.py", "shared.py"),
+            required_files=("b.py", "shared.py"),
+            expected_relevant_symbols=("Old",),
+            required_symbols=("New", "Old"),
+        )
+        self.assertEqual(
+            task.required_files_effective, ("b.py", "shared.py", "a.py")
+        )
+        self.assertEqual(task.required_symbols_effective, ("New", "Old"))
+
+    def test_new_only_task_omits_legacy_fields(self) -> None:
+        task = agent_eval.EvaluationTask(
+            id="n", title="t", request="r", required_files=("a.py",)
+        )
+        self.assertEqual(task.expected_relevant_files, ())
+        self.assertEqual(task.required_files_effective, ("a.py",))
+
+    def test_legacy_task_evaluate_semantics_unchanged(self) -> None:
+        runner = agent_eval.AgentEvaluationRunner()
+        task = _task(files=("a.py", "b.py"))
+        result = runner.evaluate(task, _candidate(("a.py", "c.py")))
+        self.assertAlmostEqual(result.precision, 0.5)
+        self.assertAlmostEqual(result.recall, 0.5)
+        self.assertAlmostEqual(result.f1, 0.5)
+
+
+class ReportEfficiencyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runner = agent_eval.AgentEvaluationRunner()
+
+    def _report(self):
+        task1 = agent_eval.EvaluationTask(
+            id="a", title="t", request="r",
+            required_files=("x.py",),
+            supporting_files=("s.py",),
+            expected_tests=("tests/test_x.py",),
+        )
+        task2 = agent_eval.EvaluationTask(
+            id="b", title="t2", request="r2",
+            required_files=("x.py",),
+            supporting_files=(),
+        )
+        cases = [
+            agent_eval.EvaluationCase(
+                task=task1,
+                candidate_set=_candidate(
+                    ("x.py", "s.py", "tests/test_x.py", "zz.py"),
+                    strategy="context",
+                    context_size=500,
+                    selected=4,
+                ),
+            ),
+            agent_eval.EvaluationCase(
+                task=task2,
+                candidate_set=_candidate(
+                    ("zz.py",), strategy="context", context_size=200, selected=1
+                ),
+            ),
+        ]
+        return self.runner.run(cases)
+
+    def test_efficiency_summary_means(self) -> None:
+        summary = self._report().efficiency_summary("context")
+        self.assertEqual(summary["task_count"], 2)
+        self.assertAlmostEqual(summary["mean_required_file_recall"], 0.5)
+        self.assertAlmostEqual(summary["mean_supporting_file_recall"], 0.5)
+        self.assertAlmostEqual(summary["mean_test_recall"], 0.5)
+        self.assertAlmostEqual(summary["mean_selected_file_count"], 2.5)
+        self.assertAlmostEqual(summary["mean_relevant_selected_file_count"], 1.5)
+        self.assertAlmostEqual(summary["mean_irrelevant_selected_file_count"], 1.0)
+        self.assertAlmostEqual(summary["mean_context_size_tokens"], 350.0)
+        self.assertAlmostEqual(summary["mean_tokens_per_required_file"], 250.0)
+        self.assertEqual(summary["failures"], [])
+
+    def test_deterministic_repeated_benchmark_execution(self) -> None:
+        first = self._report().to_dict()
+        for _ in range(2):
+            self.assertEqual(first, self._report().to_dict())
+
+    def test_weak_cases_aggregated_on_report(self) -> None:
+        report = self._report()
+        weak = report.weak_cases()
+        self.assertEqual([result.task_id for result in weak], ["b"])
+
+
 class ProducerTests(unittest.TestCase):
     def test_search_producer_for_each_result_type(self) -> None:
         task = _task(files=("repolens/search.py",))
@@ -363,6 +635,44 @@ class ProducerTests(unittest.TestCase):
         self.assertIsNotNone(candidate.context_size_tokens)
         self.assertGreater(candidate.context_size_tokens, 0)
 
+    def test_context_producer_extracts_engine_package(self) -> None:
+        from repolens.context import (
+            ContextBudget,
+            ContextEngine,
+            DependencyExpansionConfig,
+        )
+
+        fixture = REPO_ROOT / "tests" / "fixtures" / "synthetic_repository"
+        task = agent_eval.EvaluationTask(
+            id="fixture",
+            title="Invoice calculation",
+            request="invoice calculation",
+            required_files=("billing/invoice.py",),
+            supporting_files=("billing/tax.py",),
+        )
+        engine = ContextEngine(
+            fixture,
+            budget=ContextBudget(max_tokens=8000),
+            dependency=DependencyExpansionConfig(depth=1),
+        )
+        producers = (
+            agent_eval.produce_context_candidate_set,
+            agent_eval.produce_change_context_candidate_set,
+        )
+        expected_strategies = ("context", "change_context")
+        for producer, strategy in zip(producers, expected_strategies):
+            with self.subTest(strategy=strategy):
+                candidate = producer(task, engine=engine)
+                self.assertEqual(candidate.strategy, strategy)
+                self.assertTrue(all((fixture / p).is_file() for p in candidate.retrieved_files))
+                self.assertIsInstance(candidate.context_size_tokens, int)
+                self.assertGreaterEqual(candidate.context_size_tokens, 0)
+                self.assertEqual(
+                    candidate.selected_file_count, len(candidate.retrieved_files)
+                )
+                self.assertIsInstance(candidate.matched_symbols, tuple)
+                self.assertIsNotNone(candidate.latency_seconds)
+
 
 class _FirstFileSearcher:
     def __init__(self, path: Path) -> None:
@@ -396,16 +706,30 @@ class BenchmarkDefinitionTests(unittest.TestCase):
                 self.assertTrue(task.id)
                 self.assertTrue(task.title)
                 self.assertTrue(task.request)
-                self.assertFalse(task.expected_relevant_files == ())
+                self.assertFalse(task.required_files_effective == ())
                 self.assertIn(task.category, agent_eval.CATEGORIES)
 
     def test_corpus_covers_all_categories(self) -> None:
         covered = {task.category for task in self.tasks}
         self.assertEqual(covered, set(agent_eval.CATEGORIES))
 
+    def test_corpus_surfaces_are_disjoint(self) -> None:
+        for task in self.tasks:
+            with self.subTest(task_id=task.id):
+                self.assertEqual(
+                    set(task.required_files_effective) & set(task.supporting_files),
+                    set(),
+                )
+
     def test_corpus_expected_files_exist_in_repo(self) -> None:
         for task in self.tasks:
-            for path in task.expected_relevant_files:
+            surface = (
+                *task.required_files_effective,
+                *task.supporting_files,
+                *task.expected_tests,
+                *task.target_files,
+            )
+            for path in surface:
                 with self.subTest(task_id=task.id, path=path):
                     self.assertTrue((REPO_ROOT / path).is_file(), path)
 
@@ -456,7 +780,7 @@ class BenchmarkDefinitionTests(unittest.TestCase):
         output = buffer.getvalue()
 
         self.assertIn("Retrieval coverage", output)
-        self.assertIn("Agent context efficiency", output)
+        self.assertIn("Agent context usefulness", output)
         self.assertIn(
             "evaluated on different objectives and should not be treated as one leaderboard",
             output,
@@ -468,8 +792,87 @@ class BenchmarkDefinitionTests(unittest.TestCase):
         for strategy in self.benchmark.CONTEXT_STRATEGIES:
             line = next(line for line in output.splitlines() if line.startswith(f"- {strategy}:"))
             self.assertIn("required-file recall=", line)
-            self.assertIn("tokens_per_relevant=", line)
+            self.assertIn("supporting-file recall=", line)
+            self.assertIn("tokens_per_required=", line)
             self.assertNotIn("P=", line)
+
+
+class BenchmarkDiagnosticsTests(unittest.TestCase):
+    """Task-level diagnostics and weak-case detection (--diagnostics mode)."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "benchmarks"))
+        try:
+            import agent_evaluation as benchmark  # type: ignore[import-not-found]
+        finally:
+            sys.path.pop(0)
+        self.benchmark = benchmark
+
+    def _weak_report(self):
+        runner = agent_eval.AgentEvaluationRunner()
+        task = agent_eval.EvaluationTask(
+            id="weak-task",
+            title="t",
+            request="r",
+            required_files=("needed.py",),
+            supporting_files=("extra.py",),
+            expected_tests=("tests/test_x.py",),
+        )
+        cases = [
+            agent_eval.EvaluationCase(
+                task=task,
+                candidate_set=_candidate(("extra.py", "zz.py"), strategy="context", context_size=500),
+            ),
+            agent_eval.EvaluationCase(
+                task=task,
+                candidate_set=_candidate(("needed.py", "extra.py"), strategy="change_context", context_size=600, selected=2),
+            ),
+        ]
+        return runner.run(cases)
+
+    def test_weak_context_cases_detected(self) -> None:
+        report = self._weak_report()
+        weak = self.benchmark.weak_context_cases(report)
+        ids = [result.task_id for result in weak]
+        strategies = {result.strategy for result in weak}
+        self.assertEqual(ids, ["weak-task"])
+        self.assertEqual(strategies, {"context"})
+
+    def test_diagnostic_output_lists_weak_case(self) -> None:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.benchmark.print_diagnostics(self._weak_report())
+        output = buffer.getvalue()
+        self.assertIn("weak-task[context]", output)
+        self.assertIn("required_missed={needed.py}", output)
+        self.assertIn("supporting_selected={extra.py}", output)
+        self.assertIn("irrelevant_selected={zz.py}", output)
+        self.assertIn("context_tokens=500", output)
+        self.assertIn("no source content is dumped", output)
+
+    def test_diagnostics_not_in_normal_report(self) -> None:
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.benchmark.print_report(self._weak_report())
+        output = buffer.getvalue()
+        self.assertNotIn("required_missed", output)
+
+    def test_diagnostic_output_is_deterministic(self) -> None:
+        import contextlib
+        import io
+
+        buffer1, buffer2 = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buffer1):
+            self.benchmark.print_diagnostics(self._weak_report())
+        with contextlib.redirect_stdout(buffer2):
+            self.benchmark.print_diagnostics(self._weak_report())
+        self.assertEqual(buffer1.getvalue(), buffer2.getvalue())
 
 
 class BenchmarkWiringTests(unittest.TestCase):

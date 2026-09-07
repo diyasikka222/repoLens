@@ -1,4 +1,4 @@
-"""Deterministic agent-task evaluation foundation (P25.2).
+"""Deterministic agent-task evaluation foundation (P25.2–P25.3).
 
 A coding agent is only useful if the context it receives actually covers the
 files a realistic repository-level task touches. This module evaluates that
@@ -18,16 +18,33 @@ The produced :class:`EvaluationResult` reports, per case:
 - context size (tokens), number of selected files, and latency where
   measurable.
 
+P25.3 adds an explicit *agent context usefulness* model that does **not** treat
+every expected file as equally mandatory. A task distinguishes:
+
+- **required files** — genuinely needed to understand or implement the task;
+- **supporting files** — useful surrounding context, not strictly required;
+- **expected tests** — tests relevant to validating the task;
+- **required symbols** — definitions an agent needs to inspect.
+
+The :class:`ContextEfficiencyResult` then scores an actual context package on
+required/supporting/test coverage plus package size (selected files, context
+tokens, tokens per required file). This answers "was the context RepoLens built
+*both* small and useful" instead of only "did retrieval find the right files."
+
+Backward compatibility: the P25.2 ``expected_relevant_files`` /
+``expected_relevant_symbols`` fields remain supported and are merged into the
+new ``required_files`` / ``required_symbols`` surfaces deterministically (see
+:attr:`EvaluationTask.required_files_effective`), so every existing task
+definition stays valid unchanged.
+
 Nothing here calls a model or the network: strategies are built on top of the
 existing RepoLens retrieval and context engines, and every ordering is
 deterministic by construction (retrieved candidates are kept in the order the
 strategy returned them; misses are sorted; expected surfaces are normalized
-up front).
-
-The module deliberately does not re-implement retrieval: :func:`produce_*`
-helpers simply translate existing searcher and context-engine outputs into an
-:class:`CandidateSet`. The benchmark driving the whole thing lives in
-``benchmarks/agent_evaluation.py``.
+up front). The module deliberately does not re-implement retrieval: the
+:func:`produce_*` helpers simply translate existing searcher and context-engine
+outputs into a :class:`CandidateSet`. The benchmark driving the whole thing
+lives in ``benchmarks/agent_evaluation.py``.
 """
 
 from __future__ import annotations
@@ -122,16 +139,42 @@ class EvaluationTask:
     distinct from the broader expected surface used for scoring.
 
     The request field is what is fed to retrieval / context strategies.
+
+    P25.3 surface model: ``required_files`` are genuinely mandatory,
+    ``supporting_files`` merely helpful, ``expected_tests`` validate the task,
+    and ``required_symbols`` are definitions to inspect. The P25.2
+    ``expected_relevant_files`` / ``expected_relevant_symbols`` fields still
+    work and are merged into the required surfaces via
+    :attr:`required_files_effective` / :attr:`required_symbols_effective`, so
+    existing task definitions remain valid unchanged. Required and supporting
+    surfaces must not overlap: that would make scoring ambiguous.
     """
 
     id: str
     title: str
     request: str
-    expected_relevant_files: tuple[str, ...]
+    expected_relevant_files: tuple[str, ...] = ()
     target_files: tuple[str, ...] = ()
     expected_relevant_symbols: tuple[str, ...] = ()
     expected_tests: tuple[str, ...] = ()
     category: str | None = None
+    required_files: tuple[str, ...] = ()
+    supporting_files: tuple[str, ...] = ()
+    required_symbols: tuple[str, ...] = ()
+
+    @property
+    def required_files_effective(self) -> tuple[str, ...]:
+        """Deduped required surface: ``required_files`` plus the legacy
+        ``expected_relevant_files`` (both are normalized, order preserved)."""
+        return _unique_in_order((*self.required_files, *self.expected_relevant_files))
+
+    @property
+    def required_symbols_effective(self) -> tuple[str, ...]:
+        """Deduped required symbols: ``required_symbols`` plus the legacy
+        ``expected_relevant_symbols``."""
+        return _unique_in_order(
+            (*self.required_symbols, *self.expected_relevant_symbols)
+        )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_scalar(self.id, "id"))
@@ -159,6 +202,23 @@ class EvaluationTask:
         object.__setattr__(
             self, "expected_tests", _normalize_paths(self.expected_tests, "expected_tests")
         )
+        object.__setattr__(
+            self, "required_files", _normalize_paths(self.required_files, "required_files")
+        )
+        object.__setattr__(
+            self,
+            "supporting_files",
+            _normalize_paths(self.supporting_files, "supporting_files"),
+        )
+        object.__setattr__(
+            self, "required_symbols", _normalize_names(self.required_symbols, "required_symbols")
+        )
+        overlap = set(self.required_files_effective) & set(self.supporting_files)
+        if overlap:
+            raise ValueError(
+                "required and supporting surfaces must not overlap; "
+                f"files in both: {sorted(overlap)}"
+            )
 
     def to_dict(self) -> dict:
         return {
@@ -170,6 +230,9 @@ class EvaluationTask:
             "expected_relevant_symbols": list(self.expected_relevant_symbols),
             "expected_tests": list(self.expected_tests),
             "category": self.category,
+            "required_files": list(self.required_files),
+            "supporting_files": list(self.supporting_files),
+            "required_symbols": list(self.required_symbols),
         }
 
 
@@ -324,10 +387,73 @@ class EvaluationResult:
 
 
 @dataclass(frozen=True)
+class ContextEfficiencyResult:
+    """Agent-facing context usefulness metrics for one produced package (P25.3).
+
+    Unlike :class:`EvaluationResult` (retrieval coverage), this result treats
+    the task surface as graded: it distinguishes required files (mandatory),
+    supporting files (helpful), and expected tests, and it measures the actual
+    package produced by a context strategy (selected files, context tokens,
+    tokens per required file). Denominators of zero (empty required/supporting/
+    test surfaces) are handled deterministically by returning 0.0 recall and
+    ``tokens_per_required_file``.
+    """
+
+    case: EvaluationCase
+    required_file_recall: float
+    supporting_file_recall: float
+    test_recall: float
+    selected_file_count: int
+    relevant_selected_file_count: int
+    irrelevant_selected_file_count: int
+    context_size_tokens: int | None
+    tokens_per_required_file: float
+    required_files_missed: tuple[str, ...]
+    supporting_files_selected: tuple[str, ...]
+    irrelevant_files_selected: tuple[str, ...]
+
+    @property
+    def task_id(self) -> str:
+        return self.case.task.id
+
+    @property
+    def strategy(self) -> str:
+        return self.case.candidate_set.strategy
+
+    @property
+    def is_weak(self) -> bool:
+        """A task case that missed at least one required file."""
+        return self.required_file_recall < 1.0
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "strategy": self.strategy,
+            "required_file_recall": _rounded(self.required_file_recall),
+            "supporting_file_recall": _rounded(self.supporting_file_recall),
+            "test_recall": _rounded(self.test_recall),
+            "selected_file_count": self.selected_file_count,
+            "relevant_selected_file_count": self.relevant_selected_file_count,
+            "irrelevant_selected_file_count": self.irrelevant_selected_file_count,
+            "context_size_tokens": self.context_size_tokens,
+            "tokens_per_required_file": _rounded(self.tokens_per_required_file),
+            "required_files_missed": list(self.required_files_missed),
+            "supporting_files_selected": list(self.supporting_files_selected),
+            "irrelevant_files_selected": list(self.irrelevant_files_selected),
+        }
+
+
+@dataclass(frozen=True)
 class EvaluationReport:
-    """Complete, ordered evaluation output for one run."""
+    """Complete, ordered evaluation output for one run.
+
+    ``results`` carries retrieval-coverage scores per case and ``efficiency``
+    the P25.3 agent-context-usefulness scores; they are 1:1 per evaluated
+    case. ``failures`` records per-case production errors.
+    """
 
     results: tuple[EvaluationResult, ...]
+    efficiency: tuple[ContextEfficiencyResult, ...] = ()
     failures: tuple[dict, ...] = ()
 
     @property
@@ -339,6 +465,15 @@ class EvaluationReport:
 
     def for_strategy(self, strategy: str) -> tuple[EvaluationResult, ...]:
         return tuple(result for result in self.results if result.strategy == strategy)
+
+    def efficiency_for_strategy(
+        self, strategy: str
+    ) -> tuple[ContextEfficiencyResult, ...]:
+        return tuple(result for result in self.efficiency if result.strategy == strategy)
+
+    def weak_cases(self) -> tuple[ContextEfficiencyResult, ...]:
+        """All context cases that missed at least one required file."""
+        return tuple(result for result in self.efficiency if result.is_weak)
 
     def strategy_summary(self, strategy: str) -> dict:
         """Compact per-strategy summary used by the benchmark report."""
@@ -381,13 +516,46 @@ class EvaluationReport:
             "failures": failures,
         }
 
+    def efficiency_summary(self, strategy: str) -> dict:
+        """Per-strategy means of the P25.3 agent-context-usefulness metrics."""
+        efficiency = self.efficiency_for_strategy(strategy)
+
+        def _mean(key: str) -> float:
+            return _rounded(
+                _mean_number([float(getattr(result, key)) for result in efficiency])
+            )
+
+        failures = [item for item in self.failures if item["strategy"] == strategy]
+        return {
+            "strategy": strategy,
+            "task_count": len(efficiency),
+            "mean_required_file_recall": _mean("required_file_recall"),
+            "mean_supporting_file_recall": _mean("supporting_file_recall"),
+            "mean_test_recall": _mean("test_recall"),
+            "mean_selected_file_count": _rounded(
+                _mean_number([result.selected_file_count for result in efficiency])
+            ),
+            "mean_relevant_selected_file_count": _mean("relevant_selected_file_count"),
+            "mean_irrelevant_selected_file_count": _mean("irrelevant_selected_file_count"),
+            "mean_context_size_tokens": _rounded(
+                _mean_number([result.context_size_tokens for result in efficiency])
+            ),
+            "mean_tokens_per_required_file": _mean("tokens_per_required_file"),
+            "failures": failures,
+        }
+
     def to_dict(self) -> dict:
         return {
             "deterministic": DETERMINISTIC,
             "num_cases": self.num_cases,
             "results": [result.to_dict() for result in self.results],
+            "efficiency": [result.to_dict() for result in self.efficiency],
             "summaries": {
                 strategy: self.strategy_summary(strategy)
+                for strategy in self.strategies()
+            },
+            "efficiency_summaries": {
+                strategy: self.efficiency_summary(strategy)
                 for strategy in self.strategies()
             },
             "failures": list(self.failures),
@@ -437,14 +605,19 @@ class AgentEvaluationRunner:
         return self._max_candidates
 
     def evaluate(self, task: EvaluationTask, candidate_set: CandidateSet) -> EvaluationResult:
-        """Score one (task, candidate set) pair deterministically."""
+        """Score one (task, candidate set) pair deterministically (retrieval coverage).
+
+        The scoring surface is the task's required files: for P25.2-style tasks
+        this is exactly ``expected_relevant_files``; the P25.3 surface model is
+        consumed by :meth:`context_efficiency`.
+        """
         if not isinstance(task, EvaluationTask):
             raise TypeError("task must be an EvaluationTask")
         if not isinstance(candidate_set, CandidateSet):
             raise TypeError("candidate_set must be a CandidateSet")
 
         retrieved = candidate_set.retrieved_files[: self._max_candidates]
-        relevant = set(task.expected_relevant_files)
+        relevant = set(task.required_files_effective)
         precision, recall, f1 = _metrics(relevant, retrieved)
 
         retrieved_set = set(retrieved)
@@ -452,7 +625,7 @@ class AgentEvaluationRunner:
         relevant_missed = tuple(sorted(relevant - retrieved_set))
         irrelevant_retrieved = tuple(path for path in retrieved if path not in relevant)
 
-        expected_symbols = tuple(task.expected_relevant_symbols)
+        expected_symbols = tuple(task.required_symbols_effective)
         retrieved_symbols = set(candidate_set.matched_symbols)
         symbols_retrieved = tuple(
             symbol for symbol in expected_symbols if symbol in retrieved_symbols
@@ -485,10 +658,79 @@ class AgentEvaluationRunner:
             latency_seconds=candidate_set.latency_seconds,
         )
 
+    def context_efficiency(
+        self, task: EvaluationTask, candidate_set: CandidateSet
+    ) -> ContextEfficiencyResult:
+        """Score an actual context package on graded, agent-facing usefulness.
+
+        Uses the full candidate set as produced (context packages are already
+        bounded by their budget), distinguishing required, supporting and test
+        coverage, and measuring the selected-package size. Zero denominators
+        are deterministic: empty required/supporting/test surfaces yield 0.0
+        recall and ``tokens_per_required_file``.
+        """
+        if not isinstance(task, EvaluationTask):
+            raise TypeError("task must be an EvaluationTask")
+        if not isinstance(candidate_set, CandidateSet):
+            raise TypeError("candidate_set must be a CandidateSet")
+
+        selected = candidate_set.retrieved_files
+        required = set(task.required_files_effective)
+        supporting = set(task.supporting_files)
+        tests = set(task.expected_tests)
+
+        required_selected = tuple(path for path in selected if path in required)
+        supporting_selected = tuple(path for path in selected if path in supporting)
+        relevant_surface = required | supporting | tests
+        irrelevant_selected = tuple(path for path in selected if path not in relevant_surface)
+
+        required_file_recall = (
+            len(required_selected) / len(required) if required else 0.0
+        )
+        supporting_file_recall = (
+            len(supporting_selected) / len(supporting) if supporting else 0.0
+        )
+        test_recall = (
+            sum(1 for path in selected if path in tests) / len(tests) if tests else 0.0
+        )
+
+        context_size = candidate_set.context_size_tokens
+        tokens_per_required_file = (
+            (context_size / len(required_selected))
+            if context_size is not None and required_selected
+            else 0.0
+        )
+
+        return ContextEfficiencyResult(
+            case=EvaluationCase(task=task, candidate_set=candidate_set),
+            required_file_recall=required_file_recall,
+            supporting_file_recall=supporting_file_recall,
+            test_recall=test_recall,
+            selected_file_count=(
+                candidate_set.selected_file_count
+                if candidate_set.selected_file_count is not None
+                else len(selected)
+            ),
+            relevant_selected_file_count=len(selected) - len(irrelevant_selected),
+            irrelevant_selected_file_count=len(irrelevant_selected),
+            context_size_tokens=context_size,
+            tokens_per_required_file=tokens_per_required_file,
+            required_files_missed=tuple(sorted(required - set(selected))),
+            supporting_files_selected=supporting_selected,
+            irrelevant_files_selected=irrelevant_selected,
+        )
+
     def run(self, cases: Iterable[EvaluationCase]) -> EvaluationReport:
-        """Score every case, preserving iteration order."""
-        results = tuple(self.evaluate(case.task, case.candidate_set) for case in cases)
-        return EvaluationReport(results=results)
+        """Score every case (retrieval coverage + agent context usefulness),
+        preserving iteration order."""
+        results: list[EvaluationResult] = []
+        efficiency: list[ContextEfficiencyResult] = []
+        for case in cases:
+            results.append(self.evaluate(case.task, case.candidate_set))
+            efficiency.append(self.context_efficiency(case.task, case.candidate_set))
+        return EvaluationReport(
+            results=tuple(results), efficiency=tuple(efficiency)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -560,16 +802,26 @@ def _candidate_set_from_package(
     package: object,
     latency: float,
 ) -> CandidateSet:
-    """Translate a :class:`repolens.context.package.ContextPackage` into a CandidateSet."""
-    selected = tuple(
-        _as_posix(item.path)
-        for item in getattr(package, "selected_files", ())
-    )
+    """Translate a :class:`repolens.context.package.ContextPackage` into a CandidateSet.
+
+    Extracts the selected files in package order, preserves the package token
+    count and latency, and collects selected symbols where available: the
+    package-level ``matched_symbols`` plus each selected candidate's ``symbol``
+    (the definition a change-aware or symbol-retrieval candidate anchors on).
+    """
+    selected: list[str] = []
+    per_file_symbols: list[str] = []
+    for item in getattr(package, "selected_files", ()):
+        selected.append(_as_posix(item.path))
+        symbol = getattr(item, "symbol", None)
+        if isinstance(symbol, str) and symbol:
+            per_file_symbols.append(symbol)
     matched = tuple(getattr(package, "matched_symbols", ()) or ())
+    matched_symbols = _unique_in_order((*matched, *per_file_symbols))
     return CandidateSet(
         strategy=strategy,
-        retrieved_files=selected,
-        matched_symbols=matched,
+        retrieved_files=tuple(selected),
+        matched_symbols=matched_symbols,
         context_size_tokens=_as_int(getattr(package, "total_estimated_tokens", None)),
         selected_file_count=len(selected),
         latency_seconds=latency,
