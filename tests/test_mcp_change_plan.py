@@ -466,7 +466,13 @@ def test_change_context_bad_firewall_is_safe(change_state) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_change_state_builds_lazily_and_reuses(tmp_path: Path) -> None:
+def test_change_state_builds_lazily_and_reuses(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("REPOLENS_CACHE_DISABLED", raising=False)
+    monkeypatch.delenv("REPOLENS_CACHE_DIR", raising=False)
+    monkeypatch.setattr(
+        "repolens.incremental_index.home_cache_base",
+        lambda: tmp_path / "cache",
+    )
     repo = _copy_fixture(tmp_path)
     fresh = ChangePlanState(repo)
     assert fresh._index is None  # not built yet
@@ -477,7 +483,13 @@ def test_change_state_builds_lazily_and_reuses(tmp_path: Path) -> None:
     assert fresh.parsed_file_count == FIXTURE_FILE_COUNT
 
 
-def test_no_duplicate_parses_across_tool_calls(tmp_path: Path) -> None:
+def test_no_duplicate_parses_across_tool_calls(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("REPOLENS_CACHE_DISABLED", raising=False)
+    monkeypatch.delenv("REPOLENS_CACHE_DIR", raising=False)
+    monkeypatch.setattr(
+        "repolens.incremental_index.home_cache_base",
+        lambda: tmp_path / "cache",
+    )
     repo = _copy_fixture(tmp_path)
     state = _state(repo)
     fac = _factory(state)

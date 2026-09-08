@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from repolens.embedding_cache import EmbeddingCache, content_identity, normalize_embedding_identity
-from repolens.embeddings import EmbeddingProvider, Vector
+from repolens.embeddings import EmbeddingProvider, EmbeddingProviderError, Vector
 from repolens.index import Symbol, SymbolIndexBuilder
 from repolens.parser import ModuleAnalysis, PythonParser
 from repolens.search import CodeSearcher
@@ -228,6 +228,11 @@ class SemanticSearcher:
 
         new_documents = [documents[path] for path in missing]
         new_vectors = self._provider.embed_texts(new_documents)
+        if len(new_vectors) != len(missing):
+            raise EmbeddingProviderError(
+                f"embedding provider returned {len(new_vectors)} vectors for "
+                f"{len(missing)} documents"
+            )
         for path, vector in zip(missing, new_vectors):
             self._vectors_by_path[path] = vector
             self.cache_stats["embedded_documents"] += 1

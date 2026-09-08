@@ -435,7 +435,13 @@ def test_state_builds_lazily_and_reuses(tmp_path: Path) -> None:
     assert fresh.graph is graph1  # graph survives subsystem access
 
 
-def test_no_duplicate_parses_across_tool_calls(tmp_path: Path) -> None:
+def test_no_duplicate_parses_across_tool_calls(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("REPOLENS_CACHE_DISABLED", raising=False)
+    monkeypatch.delenv("REPOLENS_CACHE_DIR", raising=False)
+    monkeypatch.setattr(
+        "repolens.incremental_index.home_cache_base",
+        lambda: tmp_path / "cache",
+    )
     repo = _copy_fixture(tmp_path)
     state = _state(repo)
     fac = _factory(state)
