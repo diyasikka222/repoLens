@@ -53,12 +53,13 @@ from repolens.mcp.inspect_tool import (
     parse_inspect_arguments,
     run_inspect_symbol,
 )
+from repolens import __version__
 from repolens.mcp.tool import EngineFactory, parse_arguments, run_get_context
 
 logger = logging.getLogger("repolens.mcp")
 
 SERVER_NAME = "repolens"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = __version__
 
 TOOL_NAME = "get_context"
 IMPACT_TOOL_NAME = "analyze_impact"

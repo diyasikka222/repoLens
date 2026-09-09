@@ -18,6 +18,7 @@ import sys
 import threading
 from typing import Callable
 
+from repolens import __version__
 from repolens.context import ContextEngine
 from repolens.mcp.deps import (
     build_engine,
@@ -65,7 +66,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--version",
         action="version",
-        version="repolens-mcp 0.1.0",
+        version=f"repolens-mcp {__version__}",
     )
     return parser.parse_args(argv)
 

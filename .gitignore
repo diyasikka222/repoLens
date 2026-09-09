@@ -12,6 +12,11 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Generated setuptools / build metadata
+*.egg-info/
+build/
+dist/
+
 # Environment variables
 .env
 

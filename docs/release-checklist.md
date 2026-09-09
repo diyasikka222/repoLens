@@ -29,12 +29,18 @@ release. It is documentation, not a release.
 
 ## Package metadata
 
-- [ ] `pyproject.toml`: name, description, version, `requires-python`, and
-      dependencies are accurate
-- [ ] `repolens/__init__.py.__version__` matches the intended release version
+- [ ] `pyproject.toml`: name, description, `requires-python`, and dependencies
+      are accurate; version is declared `dynamic` and derives from
+      `repolens.__version__`
+- [ ] One canonical version: `repolens.__version__` matches the intended
+      release version and is the single source used by `pyproject.toml`, the
+      MCP server version, and the `repolens-mcp --version` flag
 - [ ] Optional-extras (`mcp`, `dev`) documented where installs are shown
-- [ ] `readme` / `[project.urls]` present (do not invent license metadata —
-      there is no `LICENSE` file yet, so license metadata is intentionally absent)
+- [ ] `readme` / `[project.urls]` present
+- [ ] **License: a human decision is required.** No license is stated anywhere
+      in README, docs, or `pyproject.toml`, so no `LICENSE` file or license
+      metadata is added until the maintainer chooses a license. Do not invent
+      one.
 
 ## Repository hygiene
 
@@ -56,18 +62,16 @@ release. It is documentation, not a release.
 
 ## Release (Phase 25.8 only)
 
-- [ ] Version bump to a definitive `1.0.0` (package + `__init__.py` +
-      `SERIAL_VERSION` where applicable)
+- [ ] Version bump to a definitive `1.0.0` in `repolens/__init__.py` (the
+      single canonical source; `pyproject.toml`, the MCP server, and the
+      `repolens-mcp --version` flag derive from it)
 - [ ] Tag the release commit
 
 ---
 
 ## Known follow-ups tracked for Phase 25.8
 
-- Remove the tracked `repolens.egg-info/` files before release (stale build
-  artifact; `SOURCES.txt` predates most modules).
+- Choose a license (required before release; none is invented here).
 - Decide whether to add a `[project.scripts]` console entry point (e.g.
   `repolens-mcp`) so the MCP server can be launched by name rather than
   `python -m repolens.mcp`.
-- Align `pyproject.toml`/`__init__.py` version (`0.0.1`) with the MCP server
-  version (`0.1.0`) at release time.
