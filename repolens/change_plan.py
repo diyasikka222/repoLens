@@ -626,16 +626,24 @@ def _build_inspection_order(
     test_items: list[PlanItem],
     arch_info: tuple[dict[str, Any], ...],
     config: ChangePlanConfig,
+    *,
+    primary_path: str | None = None,
 ) -> tuple[PlanItem, ...]:
-    """Deterministically prioritise items for inspection."""
+    """Deterministically prioritise items for inspection.
+
+    ``primary_path`` is the defining file of the primary target when it is a
+    module/package (so the primary item is a real, readable file); ``None``
+    keeps the target's bare id.
+    """
     items: list[PlanItem] = []
     rank = 0
     # 1. Primary target.
     if primary:
         rank += 1
+        path = primary_path if primary_path is not None else primary.target
         items.append(PlanItem(
-            path=primary.target,
-            module=_path_to_module(primary.target) if "/" in primary.target else primary.target,
+            path=path,
+            module=_path_to_module(path) if "/" in path else path,
             symbol=None, category=PlanCategory.PRIMARY_TARGET,
             score=100, confidence=primary.confidence,
             reason=primary.reasons[0] if primary.reasons else "primary change target",
@@ -789,6 +797,38 @@ def _path_to_module(path: str) -> str:
     return mod
 
 
+def _module_to_file_path(module: str, root: Path) -> str | None:
+    """Deterministically resolve a dotted module id to its defining file."""
+    mod_path = module.replace(".", "/")
+    py_file = root / (mod_path + ".py")
+    if py_file.is_file():
+        return str(py_file.relative_to(root))
+    init_file = root / mod_path / "__init__.py"
+    if init_file.is_file():
+        return str(init_file.relative_to(root))
+    return None
+
+
+def _target_primary_file(tc: TargetCandidate, *, root: Path) -> str | None:
+    """Resolve ``tc`` to the repository file an agent would edit for it.
+
+    File targets are already repo-relative paths and are returned unchanged.
+    Module targets resolve to their defining source file (or ``__init__.py``
+    when the module is a package); package targets resolve to their
+    ``__init__.py``. ``None`` means the target cannot be resolved to a file and
+    the caller keeps the target's bare id.
+    """
+    if tc.kind == TargetKind.FILE:
+        return tc.target
+    if tc.kind == TargetKind.MODULE:
+        return _module_to_file_path(tc.target, root)
+    if tc.kind == TargetKind.PACKAGE:
+        init_file = root / tc.target / "__init__.py"
+        if init_file.is_file():
+            return str(init_file.relative_to(root))
+    return None
+
+
 def _build_summary(
     request: str, primary: TargetCandidate | None,
     n_affected: int, n_tests: int, risk: str,
@@ -910,6 +950,32 @@ class ChangePlanEngine:
             config=cfg,
         )
 
+        # 3b. Surface the primary target's defining file when the primary is a
+        # module/package: its bare id is not a readable file, so the defining
+        # source file is folded into the affected surface (as the first
+        # affected item, bounded by max_affected_files).  File targets already
+        # are their own defining file and are left untouched.
+        affected_files = list(impact_items)
+        primary_path = None
+        if primary is not None and primary.kind != TargetKind.FILE:
+            primary_path = _target_primary_file(primary, root=self._root)
+            if primary_path is not None:
+                affected_files = [
+                    i for i in affected_files if i.path != primary_path
+                ]
+                affected_files.insert(0, PlanItem(
+                    path=primary_path,
+                    module=_path_to_module(primary_path),
+                    symbol=None, category=PlanCategory.PRIMARY_TARGET,
+                    score=100, confidence=primary.confidence,
+                    reason=(
+                        primary.reasons[0]
+                        if primary.reasons else "primary change target"
+                    ),
+                    relationship="primary", priority=0,
+                ))
+                affected_files = affected_files[:cfg.max_affected_files]
+
         # 4. Architecture enrichment.
         arch_info = _enrich_architecture(
             targets, arch_graph=self._arch_graph,
@@ -934,19 +1000,22 @@ class ChangePlanEngine:
         # 7. Inspection order.
         inspection_order = _build_inspection_order(
             primary, impact_items, test_items, arch_info, cfg,
+            primary_path=primary_path,
         )
 
         # 8. Risk.
         risk, risk_factors = _assess_risk(impact_items, test_items, targets, arch_info)
 
         # 9. Summary.
-        summary = _build_summary(request, primary, len(impact_items), len(test_items), risk)
+        summary = _build_summary(
+            request, primary, len(affected_files), len(test_items), risk
+        )
 
         return ChangePlan(
             request=request,
             targets=tuple(targets),
             primary_target=primary,
-            affected_files=tuple(impact_items),
+            affected_files=tuple(affected_files),
             affected_symbols=affected_symbols,
             architecture=arch_info,
             tests=tuple(test_items),
@@ -956,7 +1025,7 @@ class ChangePlanEngine:
             summary=summary,
             stats={
                 "target_count": len(targets),
-                "affected_file_count": len(impact_items),
+                "affected_file_count": len(affected_files),
                 "test_count": len(test_items),
                 "inspection_item_count": len(inspection_order),
                 "arch_info_count": len(arch_info),

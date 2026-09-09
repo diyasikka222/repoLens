@@ -107,6 +107,42 @@ def test_package_target() -> None:
     assert plan.primary_target.kind == TargetKind.PACKAGE
 
 
+def test_module_target_defining_file_in_affected_surface() -> None:
+    plan = _engine().plan("change", target="app.services.checkout")
+    assert plan.primary_target is not None
+    assert plan.primary_target.kind == TargetKind.MODULE
+    # The defining file is the primary affected item (a readable file, not the
+    # bare dotted id) and the first inspection item.
+    defining = [
+        i for i in plan.affected_files
+        if i.category == PlanCategory.PRIMARY_TARGET
+    ]
+    assert len(defining) == 1
+    assert defining[0].path == "app/services/checkout.py"
+    assert defining[0].module == "app.services.checkout"
+    primary_item = plan.inspection_order[0]
+    assert primary_item.path == "app/services/checkout.py"
+    assert primary_item.category == PlanCategory.PRIMARY_TARGET
+
+
+def test_module_target_primary_survives_affected_cap() -> None:
+    plan = _engine(config=ChangePlanConfig(max_affected_files=1)).plan(
+        "change", target="app.services.checkout"
+    )
+    assert [i.path for i in plan.affected_files] == ["app/services/checkout.py"]
+
+
+def test_file_target_affected_surface_unchanged() -> None:
+    plan = _engine().plan("change", target="app/services/checkout.py")
+    assert plan.primary_target is not None
+    assert plan.primary_target.kind == TargetKind.FILE
+    assert all(
+        i.category != PlanCategory.PRIMARY_TARGET for i in plan.affected_files
+    )
+    first = plan.inspection_order[0]
+    assert first.path == "app/services/checkout.py"
+
+
 # ---------------------------------------------------------------------------
 # Natural language
 # ---------------------------------------------------------------------------
@@ -547,8 +583,12 @@ def test_plan_response_payload_structure() -> None:
         "affected_files", "affected_symbols", "callers", "callees",
         "dependencies", "dependents", "architecture", "tests",
         "inspection_order", "risk", "risk_factors", "confidence",
-        "summary", "statistics", "deterministic",
+        "summary", "statistics", "diagnostics", "deterministic",
     }
+    # Wall-clock run metadata lives only under diagnostics (deterministic
+    # contract); statistics carries deterministic counters only.
+    assert "build_time" not in payload["statistics"]
+    assert isinstance(payload["diagnostics"]["build_time"], float)
     json.dumps(payload)  # JSON-safe
 
 

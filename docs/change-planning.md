@@ -47,7 +47,7 @@ An explicit target resolves in priority order: **file path** → **package path*
 | ----- | ------- |
 | `targets` | Ranked candidate targets (kind, score, confidence, reasons). |
 | `primary_target` | The single highest-ranked candidate (or `None`). |
-| `affected_files` | Impact-enrichment results (callers, dependencies, dependents, tests, …). |
+| `affected_files` | Impact-enrichment results (callers, dependencies, dependents, tests, …). When the primary target is a module/package, its **defining source file** is the first affected item (so the primary surface is a real, readable file, never a bare module/package id). Existing file-target behavior is unchanged. |
 | `affected_symbols` | Symbols tied to the affected files. |
 | `architecture` | Per-target architecture metadata (package, subsystem, dependencies, dependents, entry module, dependency/dependent packages). |
 | `tests` | Candidate tests with the reason each is recommended. |

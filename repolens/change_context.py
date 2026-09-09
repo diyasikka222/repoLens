@@ -299,6 +299,20 @@ def explain_change_context(
     }
 
 
+#: Deterministic statistics rendered under ``statistics`` in the MCP payload.
+#: Wall-clock time is run metadata, not a substantive result, so it is
+#: separated into ``diagnostics`` (see :func:`plan_response_payload`) and is
+#: excluded from the ``deterministic`` contract.
+_STATISTICS_KEYS: tuple[str, ...] = (
+    "target_count",
+    "affected_file_count",
+    "test_count",
+    "inspection_item_count",
+    "arch_info_count",
+    "parsed_files",
+)
+
+
 def plan_response_payload(plan: ChangePlan, request: str) -> dict:
     """Render a :class:`ChangePlan` as a structured, JSON-safe response dict.
 
@@ -306,6 +320,11 @@ def plan_response_payload(plan: ChangePlan, request: str) -> dict:
     every value JSON-serializable, and never exposes internal Python objects.
     The analysis/signals block is re-derived with the same deterministic
     :func:`~repolens.change_plan.analyze_request` the engine used.
+
+    ``statistics`` carries only deterministic counters; wall-clock run
+    metadata (``build_time``) is reported separately under ``diagnostics``
+    because it is not reproducible across runs and is excluded from the
+    ``deterministic: true`` contract.
     """
     analysis = analyze_request(request)
     return {
@@ -353,7 +372,16 @@ def plan_response_payload(plan: ChangePlan, request: str) -> dict:
             else "unresolved"
         ),
         "summary": plan.summary,
-        "statistics": dict(plan.stats),
+        "statistics": {
+            k: plan.stats[k] for k in _STATISTICS_KEYS if k in plan.stats
+        },
+        "diagnostics": {
+            "build_time": plan.stats.get("build_time"),
+            "note": (
+                "wall-clock run metadata; not reproducible across runs and "
+                "excluded from the deterministic contract"
+            ),
+        },
         "deterministic": True,
     }
 

@@ -221,6 +221,59 @@ def test_change_plan_deterministic(state) -> None:
     assert a == b
 
 
+def test_module_target_defining_file_is_a_change_candidate(state) -> None:
+    result = run_change_plan(
+        _factory(state), "change", target="app.services.checkout"
+    )
+    assert result["primary_target"]["kind"] == "module"
+    assert result["primary_target"]["target"] == "app.services.checkout"
+    assert "app/services/checkout.py" in {
+        i["path"] for i in result["affected_files"]
+    }
+    primary_item = result["inspection_order"][0]
+    assert primary_item["path"] == "app/services/checkout.py"
+    assert primary_item["category"] == "primary_target"
+
+    plan = state.default_engine.plan(
+        "change", target="app.services.checkout"
+    )
+    candidates = plan_to_change_candidates(plan, root=ROOT)
+    primary = [
+        c for c in candidates if c.change_category == "primary_target"
+    ]
+    assert [str(c.path) for c in primary] == ["app/services/checkout.py"]
+
+
+def test_change_plan_payload_separates_wall_clock_diagnostics(state) -> None:
+    result = run_change_plan(_factory(state), "Add refund support to checkout")
+    assert result["deterministic"] is True
+    # Wall-clock time is classified as non-deterministic diagnostics, never
+    # part of the deterministic statistics.
+    assert "build_time" not in result["statistics"]
+    assert result["statistics"]["affected_file_count"] >= 0
+    assert isinstance(result["diagnostics"]["build_time"], float)
+    assert "note" in result["diagnostics"]
+
+
+def test_change_plan_substantive_results_deterministic_across_engines(
+    tmp_path: Path,
+) -> None:
+    results = []
+    for i in range(2):
+        repo = tmp_path / f"repo{i}"
+        shutil.copytree(ROOT, repo)
+        state = _state(repo)
+        results.append(
+            run_change_plan(_factory(state), "Add refund support to checkout")
+        )
+    assert results[0]["statistics"] == results[1]["statistics"]
+    assert results[0]["affected_files"] == results[1]["affected_files"]
+    assert results[0]["inspection_order"] == results[1]["inspection_order"]
+    a = {k: v for k, v in results[0].items() if k != "diagnostics"}
+    b = {k: v for k, v in results[1].items() if k != "diagnostics"}
+    assert a == b
+
+
 def test_change_plan_serializes_to_json(state) -> None:
     result = run_change_plan(
         _factory(state), "Add refund support to checkout"
@@ -417,6 +470,26 @@ def test_change_context_deterministic(change_state) -> None:
         "Add refund support to checkout",
     )
     assert a == b
+
+
+def test_change_context_surfaces_module_target_defining_file(change_state) -> None:
+    firewall = ContextFirewall()
+    result = run_change_context(
+        _engine_factory(ROOT),
+        firewall,
+        _factory(change_state),
+        "change",
+        target="app.services.checkout",
+    )
+    assert "app/services/checkout.py" in {
+        c["path"] for c in result["selected_files"]
+    }
+    primary_expl = [
+        e for e in result["explanations"]
+        if e["category"] == "primary_target"
+    ]
+    assert primary_expl
+    assert primary_expl[0]["path"] == "app/services/checkout.py"
 
 
 def test_change_context_firewall_blocks_sensitive_file() -> None:
