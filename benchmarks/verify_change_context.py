@@ -75,12 +75,20 @@ def _engine_factory(root: Path):
 
 
 def _substantive(response: dict) -> dict:
-    """Response content excluding timing/parsed statistics."""
+    """Response content excluding run-environment metadata.
+
+    ``statistics`` carries deterministic counters, but the ``diagnostics``
+    object (added in P25.6) is wall-clock run metadata — ``build_time`` and
+    similar — and must be excluded from cold-vs-warm determinism comparisons
+    (same contract as ``benchmarks/opencode_e2e.py``'s latency stripping).
+    """
     d = dict(response)
     d.pop("statistics", None)
+    d.pop("diagnostics", None)
     if "change_plan" in d:
         change_plan = dict(d["change_plan"])
         change_plan["statistics"] = "stripped"
+        change_plan["diagnostics"] = "stripped"
         d["change_plan"] = change_plan
     return d
 

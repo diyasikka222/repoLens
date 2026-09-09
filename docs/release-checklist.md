@@ -1,0 +1,73 @@
+# Release Readiness Checklist (v1.0 preparation)
+
+This checklist is the **preparation gate for the v1.0 release** (Phase 25.8 is
+the actual release). Run it against the working tree before cutting the
+release. It is documentation, not a release.
+
+## Automated verification
+
+- [ ] Full test suite passes: `python -m pytest -q`
+- [ ] Documentation tests pass: `python -m pytest tests/test_documentation.py -q`
+- [ ] CLI checks pass:
+  - [ ] `python -m repolens.mcp --help` (the only package CLI; `python -m repolens` has no `__main__`)
+- [ ] Benchmark smoke tests pass:
+  - [ ] `python benchmarks/production_benchmark.py .`
+  - [ ] `python benchmarks/verify_change_context.py .`
+  - [ ] `python benchmarks/opencode_e2e.py . --mode assisted` (exit 0)
+  - [ ] `python benchmarks/opencode_e2e.py .` (exit 1 is *expected* in `both` mode — baseline mode intentionally under-covers; see `docs/opencode-e2e.md`)
+- [ ] `git diff --check` is clean (no whitespace errors)
+
+## Documentation
+
+- [ ] `README.md` reviewed: accurate install / quick-start / embeddings /
+      OpenCode / MCP-tools pointers / limitations
+- [ ] All MCP tools documented in `docs/mcp-tools.md` (names match `repolens/mcp/server.py`)
+- [ ] OpenCode integration documented in `docs/opencode-e2e.md`
+- [ ] Every documented command exists (no references to removed APIs)
+- [ ] No stale milestone/workflow claims in user-facing docs
+- [ ] No duplicated large sections across documents
+
+## Package metadata
+
+- [ ] `pyproject.toml`: name, description, version, `requires-python`, and
+      dependencies are accurate
+- [ ] `repolens/__init__.py.__version__` matches the intended release version
+- [ ] Optional-extras (`mcp`, `dev`) documented where installs are shown
+- [ ] `readme` / `[project.urls]` present (do not invent license metadata —
+      there is no `LICENSE` file yet, so license metadata is intentionally absent)
+
+## Repository hygiene
+
+- [ ] Working tree reviewed via `git status` / `git diff`
+- [ ] `opencode.json` is **not** staged or committed (it is local/untracked)
+- [ ] No secrets, API keys, bearer tokens, or private keys in tracked files
+- [ ] No user-specific absolute filesystem paths in tracked docs/examples
+- [ ] No temporary benchmark artifacts or local cache directories tracked
+- [ ] Generated `*.egg-info/` build artifacts removed from version control
+      (they are regenerated on install and can go stale)
+
+## Behavior
+
+- [ ] Determinism verified: cold/warm/cache-disabled produce identical
+      substantive output (benchmarks above)
+- [ ] Reliability checks verified (`tests/test_reliability.py`, the failure
+      matrix in `docs/reliability.md`)
+- [ ] No new network dependencies introduced
+
+## Release (Phase 25.8 only)
+
+- [ ] Version bump to a definitive `1.0.0` (package + `__init__.py` +
+      `SERIAL_VERSION` where applicable)
+- [ ] Tag the release commit
+
+---
+
+## Known follow-ups tracked for Phase 25.8
+
+- Remove the tracked `repolens.egg-info/` files before release (stale build
+  artifact; `SOURCES.txt` predates most modules).
+- Decide whether to add a `[project.scripts]` console entry point (e.g.
+  `repolens-mcp`) so the MCP server can be launched by name rather than
+  `python -m repolens.mcp`.
+- Align `pyproject.toml`/`__init__.py` version (`0.0.1`) with the MCP server
+  version (`0.1.0`) at release time.
