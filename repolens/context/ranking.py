@@ -8,6 +8,12 @@ Primary-ranking policy (in order):
 2. retrieval score (higher is better),
 3. repository-relative path (alphabetical).
 
+Symbol-discovered files that retrieval never surfaced (P26.1 Step 2) join the
+primary tier as ``PRIMARY``-role candidates without retrieval signals: they
+rank after every retrieved primary and before every dependency/architecture/
+change-plan candidate, ordered by path. Only files already present as
+primaries/dependencies are re-ranked — existing orderings are preserved.
+
 Dependency-expanded ranking policy (in order):
 1. graph distance (closer first),
 2. relationship strength (dependents — reverse dependencies / callers — rank

@@ -49,6 +49,12 @@ from repolens.context.package import ContextPackage
 from repolens.context.ranking import rank_candidates
 from repolens.context.symbol_retrieval import match_symbols, symbol_file_paths
 from repolens.context.tokens import estimate_tokens
+from repolens.context_trace import (
+    ContextPipelineTracer,
+    observe_change_candidates,
+    observe_rank_selection,
+    observe_standard_stages,
+)
 from repolens.evaluation import Searcher
 from repolens.graph import DependencyGraphBuilder
 from repolens.index import SymbolIndexBuilder
@@ -88,6 +94,7 @@ class ContextEngine:
         reference_graph: object | None = None,
         primary_limit: int = DEFAULT_PRIMARY_LIMIT,
         architecture: object | None = None,
+        tracer: ContextPipelineTracer | None = None,
     ) -> None:
         self.root = Path(root)
         if not self.root.is_dir():
@@ -137,6 +144,8 @@ class ContextEngine:
         # change-aware build. It reuses the index/graph/symbol indexes above,
         # so no repository re-parse ever happens.
         self._change_plan_engine = None
+        # P26.1 optional observational tracer (no-op by default).
+        self._tracer = tracer
 
     def build_context(
         self,
@@ -260,11 +269,26 @@ class ContextEngine:
         architecture_candidates_ctx = self._build_architecture_candidates(
             arch_matches
         )
+        # P26.1: a file that defines a symbol referenced by the query is a
+        # direct match even when retrieval did not surface it at the primary
+        # limit. Materialize it through the normal candidate pipeline (role and
+        # inclusion reason below) so symbol discovery always yields an explicit,
+        # budget-eligible candidate. Dedupe keeps retrieved/expanded identities.
+        symbol_candidates = self._build_symbol_candidates(symbol_matches)
+
+        observe_standard_stages(
+            self._tracer,
+            retrieval_meta=primary_meta,
+            symbol_paths=symbol_paths,
+            dependency_nodes=dependency_nodes,
+            arch_matches=arch_matches,
+        )
 
         all_candidates = (
             list(primary_candidates)
             + list(dependency_candidates)
             + list(architecture_candidates_ctx)
+            + symbol_candidates
         )
         # Never include the same file twice: a file that is both a retrieved
         # primary and a dependency-expanded node keeps its higher-priority
@@ -273,11 +297,20 @@ class ContextEngine:
         ranked = rank_candidates(all_candidates)
         selected, excluded = select_within_budget(ranked, self._budget)
 
+        observe_rank_selection(
+            self._tracer,
+            ranked=ranked,
+            selected=selected,
+            excluded=excluded,
+        )
+
         package = ContextPackage(
             query=query,
             budget=self._budget,
             selected_files=tuple(selected),
-            primary_candidates=tuple(primary_candidates),
+            primary_candidates=tuple(
+                _dedupe_candidates(list(primary_candidates) + symbol_candidates)
+            ),
             dependency_candidates=tuple(dependency_candidates)
             + tuple(architecture_candidates_ctx),
             excluded_candidates=tuple(excluded),
@@ -334,10 +367,12 @@ class ContextEngine:
         )
 
         standard = self._collect_standard_candidates(query)
+        observe_change_candidates(self._tracer, change_candidates)
         all_candidates = (
             standard["primary"]
             + standard["dependency"]
             + standard["architecture"]
+            + standard["symbol"]
             + change_candidates
         )
         all_candidates = _dedupe_candidates(all_candidates)
@@ -349,12 +384,20 @@ class ContextEngine:
                 [c for c in change_candidates if c.path in selected_paths]
             )
         )
+        observe_rank_selection(
+            self._tracer,
+            ranked=ranked,
+            selected=selected,
+            excluded=excluded,
+        )
 
         package = ContextPackage(
             query=query,
             budget=self._budget,
             selected_files=tuple(selected),
-            primary_candidates=tuple(standard["primary"]),
+            primary_candidates=tuple(
+                _dedupe_candidates(standard["primary"] + standard["symbol"])
+            ),
             dependency_candidates=tuple(standard["dependency"])
             + tuple(standard["architecture"]),
             excluded_candidates=tuple(excluded),
@@ -436,12 +479,21 @@ class ContextEngine:
         architecture_candidates_ctx = self._build_architecture_candidates(
             arch_matches
         )
+        symbol_candidates = self._build_symbol_candidates(symbol_matches)
+        observe_standard_stages(
+            self._tracer,
+            retrieval_meta=primary_meta,
+            symbol_paths=symbol_paths,
+            dependency_nodes=dependency_nodes,
+            arch_matches=arch_matches,
+        )
         return {
             "intent": intent,
             "symbol_matches": symbol_matches,
             "primary": primary_candidates,
             "dependency": dependency_candidates,
             "architecture": architecture_candidates_ctx,
+            "symbol": symbol_candidates,
         }
 
     def render(self, package: ContextPackage) -> str:
@@ -759,6 +811,41 @@ class ContextEngine:
                         "subsystem": match.subsystem,
                         "direction": match.direction.value,
                     },
+                )
+            )
+        return candidates
+
+    def _build_symbol_candidates(
+        self, symbol_matches: list,
+    ) -> list[ContextCandidate]:
+        """Turn symbol-discovered files into explicit :class:`ContextCandidate` objects.
+
+        Symbol matching is a deterministic discovery path in its own right: a
+        file that defines a symbol named by the query is relevant even when
+        retrieval did not surface it at the primary limit. These files join
+        the candidate pipeline as primary-role candidates carrying
+        ``INCLUSION_SYMBOL_MATCH`` (the existing inclusion taxonomy) but no
+        retrieval signals, so ranking places them after retrieved primaries and
+        before every dependency/architecture/change-plan tier. One candidate per
+        unique file; ordering follows the deterministic symbol-match order.
+        """
+        candidates: list[ContextCandidate] = []
+        if not symbol_matches:
+            return candidates
+        by_path: dict[Path, object] = {}
+        for match in symbol_matches:
+            by_path.setdefault(match.path, match)
+        for path in sorted(by_path):
+            match = by_path[path]
+            source = self._read_source(path)
+            candidates.append(
+                ContextCandidate(
+                    path=path,
+                    source=source,
+                    role=CandidateRole.PRIMARY,
+                    estimated_tokens=estimate_tokens(source),
+                    selection_reason=f"symbol match: {match.symbol.name}",
+                    inclusion_reason=INCLUSION_SYMBOL_MATCH,
                 )
             )
         return candidates
