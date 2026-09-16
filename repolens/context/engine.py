@@ -52,6 +52,7 @@ from repolens.context.tokens import estimate_tokens
 from repolens.context_trace import (
     ContextPipelineTracer,
     observe_change_candidates,
+    observe_focus,
     observe_rank_selection,
     observe_standard_stages,
 )
@@ -295,7 +296,11 @@ class ContextEngine:
         # (primary) role and retains its retrieval signals.
         all_candidates = _dedupe_candidates(all_candidates)
         ranked = rank_candidates(all_candidates)
-        selected, excluded = select_within_budget(ranked, self._budget)
+        selected, excluded = select_within_budget(
+            ranked,
+            self._budget,
+            focused=self._focused_selection(symbol_matches=symbol_matches),
+        )
 
         observe_rank_selection(
             self._tracer,
@@ -377,7 +382,14 @@ class ContextEngine:
         )
         all_candidates = _dedupe_candidates(all_candidates)
         ranked = rank_candidates(all_candidates)
-        selected, excluded = select_within_budget(ranked, self._budget)
+        selected, excluded = select_within_budget(
+            ranked,
+            self._budget,
+            focused=self._focused_selection(
+                symbol_matches=standard["symbol_matches"],
+                change_candidates=change_candidates,
+            ),
+        )
         selected_paths = {c.path for c in selected}
         surviving_changes = tuple(
             _dedupe_candidates(
@@ -887,6 +899,62 @@ class ContextEngine:
             return (self.root / path).read_text(encoding="utf-8")
         except (OSError, ValueError):
             return ""
+
+    # -- P26.2 Step 4: focused-context substitution --------------------------
+
+    def _focused_selection(
+        self,
+        *,
+        symbol_matches=(),
+        change_candidates=(),
+    ):
+        """Build the deterministic focused-selection provider for one build.
+
+        Evidence is the per-path symbol names already known to matter for the
+        task: query symbol matches first, then change-plan candidate symbols
+        (change-plan targets carry ``candidate.symbol``).  Focus events are
+        forwarded to the attached tracer (``observe_focus``) when one exists.
+        """
+        from repolens.context.focus_selection import FocusedSelection
+
+        evidence = _focused_evidence(symbol_matches, change_candidates)
+        return FocusedSelection(
+            evidence=evidence,
+            on_event=_focus_event_sink(self._tracer),
+        )
+
+
+def _focus_event_sink(tracer):
+    """Return a no-op event sink unless a tracer is attached."""
+    if tracer is None:
+        return None
+    return lambda event: observe_focus(tracer, [event])
+
+
+def _focused_evidence(symbol_matches, change_candidates) -> dict:
+    """Map trail of paths to the deterministic ordered symbol-name evidence.
+
+    Query symbol matches contribute their matched symbol names; change-plan
+    candidates contribute the symbol they carry (``candidate.symbol``).  Order
+    follows discovery order (deterministic; no re-sorting that could interleave
+    the query and change-plan sources unexpectedly).
+    """
+    by_path: dict = {}
+    for match in symbol_matches:
+        name = getattr(getattr(match, "symbol", None), "name", None)
+        if not name:
+            continue
+        names = by_path.setdefault(match.path, [])
+        if name not in names:
+            names.append(name)
+    for candidate in change_candidates:
+        name = getattr(candidate, "symbol", None)
+        if not name:
+            continue
+        names = by_path.setdefault(candidate.path, [])
+        if name not in names:
+            names.append(name)
+    return {path: tuple(names) for path, names in by_path.items()}
 
 
 # ---------------------------------------------------------------------------

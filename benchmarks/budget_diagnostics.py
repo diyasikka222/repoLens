@@ -119,13 +119,17 @@ def run_budget_diagnostics(
                     supporting_files=task.supporting_files,
                     expected_tests=task.expected_tests,
                     firewall_decisions=firewall_decisions_for_package(safe),
+                    focus_events=trace.focus,
                 )
             )
     return BudgetDiagnosticsReport(reports=tuple(reports))
 
 
-def print_report(report: BudgetDiagnosticsReport) -> None:
-    """Print per-task spend tables plus aggregate budget diagnostics."""
+def print_report(report: BudgetDiagnosticsReport, *, focus_events: bool = False) -> None:
+    """Print per-task spend tables plus aggregate budget diagnostics.
+
+    Per-synthesized focus events are verbose; they print only when requested.
+    """
     print(
         "budget-aware context selection diagnostics (P26.2): measurement only, "
         "no retrieval/ranking/selection/budget/firewall changes"
@@ -170,6 +174,23 @@ def print_report(report: BudgetDiagnosticsReport) -> None:
                     f" reason={row.exclusion_reason or row.exclusion_category or '-'}"
                     f" competing=[{competed}]"
                 )
+            for event in package.focus_events if focus_events else ():
+                print(
+                    f"      FOCUS {event['path']}::{event['focus_name']}"
+                    f" lines={event['focus_start_line']}-{event['focus_end_line']}"
+                    f" focused_tok={event['focused_estimated_tokens']}"
+                    f" full_tok={event['full_estimated_tokens']}"
+                    f" focus_reason={event['focus_reason']}"
+                    f" full_rejected={event['full_rejection_reason']}"
+                )
+            if package.required_focused():
+                print("      REQUIRED RECOVERED VIA FOCUS:")
+                for row in package.required_focused():
+                    print(
+                        f"        {row.path}: rank=#{row.rank}"
+                        f" full_tok={row.full_tokens}"
+                        f" reason={row.exclusion_reason or '-'}"
+                    )
         print()
         agg = report.aggregate(strategy)
         print(
@@ -178,6 +199,10 @@ def print_report(report: BudgetDiagnosticsReport) -> None:
             f" used={agg.total_selected_tokens}"
             f" unused={agg.unused_budget}"
             f" selected={agg.selected_count} rejected={agg.rejected_count}"
+        )
+        print(
+            f"  focused: generated={agg.focused_generated}"
+            f" selected={agg.focused_selected}"
         )
         print(
             f"  oversized: total={agg.oversized_total_count}"
@@ -256,8 +281,19 @@ def _print_verdict(report: BudgetDiagnosticsReport) -> None:
             verdict = "B (earlier selections consuming the budget)"
         else:  # pragma: no cover - defensive
             verdict = "C (poor ranking)"
+        focused = agg.focused_selected
+        recovered = sum(
+            len(package.required_focused())
+            for package in report.for_strategy(strategy)
+        )
+        focus_note = (
+            f" focused_recovered_required={recovered}"
+            if recovered
+            else ""
+        )
         print(f"  [{strategy}] lost={total_lost} by_size={by_size} "
-              f"by_consumption={by_consumption} -> {verdict}")
+              f"by_consumption={by_consumption} focused_selected={focused}"
+              f"{focus_note} -> {verdict}")
 
 
 def _fmt(value) -> str:
@@ -274,6 +310,10 @@ def main(argv: list[str] | None = None) -> int:
     json_path: Path | None = None
     strategies = set(DEFAULT_STRATEGIES)
     args = list(argv)
+    focus_events = False
+    if "--focus-events" in args:
+        args.remove("--focus-events")
+        focus_events = True
     if "--json" in args:
         index = args.index("--json")
         json_path = Path(args.pop(index + 1))
@@ -286,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
         tasks = build_corpus(REPO_ROOT)
         report = run_budget_diagnostics(tasks, REPO_ROOT, strategies=strategies_tuple)
         elapsed = time.perf_counter() - started
-        print_report(report)
+        print_report(report, focus_events=focus_events)
         if json_path is not None:
             json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
             print(f"json report written to {json_path}")

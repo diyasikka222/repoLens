@@ -119,6 +119,10 @@ class BudgetSpendRow:
     #: Best-available numeric score (retrieval_score, else change_score).
     score: float | None
     estimated_tokens: int
+    #: Complete full-file estimate for the path (equals ``estimated_tokens``
+    #: unless the path was recovered via focused substitution, which carries the
+    #: smaller focused slice in ``estimated_tokens``). Drives size attribution.
+    full_tokens: int | None
     discovery_source: str | None
     inclusion_reason: str | None
     surface_tag: SurfaceTag
@@ -145,6 +149,7 @@ class BudgetSpendRow:
             "path": self.path,
             "score": _rounded(self.score),
             "estimated_tokens": self.estimated_tokens,
+            "full_tokens": self.full_tokens,
             "discovery_source": self.discovery_source,
             "inclusion_reason": self.inclusion_reason,
             "surface_tag": self.surface_tag.value,
@@ -179,11 +184,15 @@ class BudgetSummary:
     required_excluded_by_size: int
     #: Required files dropped because earlier selections consumed the budget.
     required_excluded_by_consumption: int
-    excluded_by_category: tuple[tuple[str, int], ...]
-    avg_selected_tokens: float | None
-    median_selected_tokens: float | None
-    avg_required_rank: float | None
-    median_required_rank: float | None
+    #: Focused candidates synthesized during selection (P26.2 Step 4).
+    focused_generated: int = 0
+    #: Focused candidates that reached the final selection (P26.2 Step 4).
+    focused_selected: int = 0
+    excluded_by_category: tuple[tuple[str, int], ...] = ()
+    avg_selected_tokens: float | None = None
+    median_selected_tokens: float | None = None
+    avg_required_rank: float | None = None
+    median_required_rank: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -197,6 +206,8 @@ class BudgetSummary:
             "oversized_remaining_count": self.oversized_remaining_count,
             "required_excluded_by_size": self.required_excluded_by_size,
             "required_excluded_by_consumption": self.required_excluded_by_consumption,
+            "focused_generated": self.focused_generated,
+            "focused_selected": self.focused_selected,
             "excluded_by_category": {
                 category: count for category, count in self.excluded_by_category
             },
@@ -216,6 +227,8 @@ class BudgetSpendReport:
     budget_max_tokens: int | None
     rows: tuple[BudgetSpendRow, ...]
     summary: BudgetSummary
+    #: Focused-context substitution events (P26.2 Step 4), in capture order.
+    focus_events: tuple[dict, ...] = ()
 
     def required_missing(self) -> tuple[BudgetSpendRow, ...]:
         """Required-surface files that did not reach the final context."""
@@ -228,6 +241,29 @@ class BudgetSpendReport:
     @staticmethod
     def _reached(row: BudgetSpendRow) -> bool:
         return row.selected and row.exclusion_category is not ExclusionCategory.FIREWALL_FILTERED
+
+    def required_focused(self) -> tuple[BudgetSpendRow, ...]:
+        """Required-surface files recovered specifically via focused substitution."""
+        recovered = {
+            row.path
+            for row in self.rows
+            if row.surface_tag is SurfaceTag.REQUIRED
+            and (row.oversized_total or row.oversized_remaining)
+        }
+        selected = {
+            row.path
+            for row in self.rows
+            if row.surface_tag is SurfaceTag.REQUIRED and row.selected
+        }
+        if not recovered:
+            return ()
+        return tuple(
+            row
+            for row in self.rows
+            if row.surface_tag is SurfaceTag.REQUIRED
+            and row.path in recovered
+            and row.path in selected
+        )
 
     def competing_selected(self, row: BudgetSpendRow) -> tuple[str, ...]:
         """Selected files that consumed budget before ``row`` was considered."""
@@ -242,6 +278,7 @@ class BudgetSpendReport:
             "budget_max_tokens": self.budget_max_tokens,
             "summary": self.summary.to_dict(),
             "rows": [row.to_dict() for row in self.rows],
+            "focus_events": [dict(event) for event in self.focus_events],
         }
 
 
@@ -260,21 +297,27 @@ def analyze_budget_spend(
     supporting_files: Iterable[str] = (),
     expected_tests: Iterable[str] = (),
     firewall_decisions: Mapping[str, str] | None = None,
+    focus_events: Iterable[Mapping] = (),
 ) -> BudgetSpendReport:
     """Reconstruct the per-candidate budget accounting from a captured trace.
 
     ``budget_max_tokens`` is the context budget the build used; the surface
     iterables are the task's required/supporting/test paths; ``firewall_decisions``
     (optional) is a path -> verdict mapping from
-    :func:`repolens.required_file_diagnostics.firewall_decisions_for_package`.
+    :func:`repolens.required_file_diagnostics.firewall_decisions_for_package`;
+    ``focus_events`` (optional, P26.2 Step 4) are the focused-context
+    substitution events captured on the trace, used for focused accounting.
 
     The walk never re-runs selection: it follows ``trace.ranked`` in order,
     attributes each candidate to its traced outcome, and carries the traced
     token counts forward. Deterministic for identical inputs.
     """
-    selected_by_path = {
-        entry["path"]: int(entry.get("estimated_tokens") or 0) for entry in trace.selected
-    }
+    selected_by_path: dict[str, int] = {}
+    for entry in trace.selected:
+        path = entry["path"]
+        selected_by_path[path] = (
+            selected_by_path.get(path, 0) + int(entry.get("estimated_tokens") or 0)
+        )
     excluded_by_path = {entry["path"]: entry for entry in trace.excluded}
     firewall = dict(firewall_decisions or {})
 
@@ -283,8 +326,9 @@ def analyze_budget_spend(
     for rank, entry in enumerate(trace.ranked, start=1):
         path = entry["path"]
         selected = path in selected_by_path
+        full_estimate = int(entry.get("estimated_tokens") or 0)
         tokens = (
-            selected_by_path[path] if selected else int(entry.get("estimated_tokens") or 0)
+            selected_by_path[path] if selected else full_estimate
         )
         remaining_before = (
             None if budget_max_tokens is None else budget_max_tokens - cumulative
@@ -310,12 +354,12 @@ def analyze_budget_spend(
             category = ExclusionCategory.FIREWALL_FILTERED
 
         oversized_total = (
-            budget_max_tokens is not None and tokens > budget_max_tokens
+            budget_max_tokens is not None and full_estimate > budget_max_tokens
         )
         oversized_remaining = (
             budget_max_tokens is not None
             and remaining_before is not None
-            and tokens > remaining_before
+            and full_estimate > remaining_before
         )
 
         rows.append(
@@ -326,6 +370,7 @@ def analyze_budget_spend(
                 path=path,
                 score=_best_score(entry),
                 estimated_tokens=tokens,
+                full_tokens=full_estimate,
                 discovery_source=(
                     trace.discovery_source(path).value
                     if trace.discovery_source(path) is not None
@@ -350,12 +395,24 @@ def analyze_budget_spend(
         cumulative = cumulative_after
 
     summary = _summarize_rows(rows, budget_max_tokens)
+    focused = tuple(dict(event) for event in focus_events)
+    if focused:
+        summary = replace(
+            summary,
+            focused_generated=len(focused),
+            focused_selected=sum(
+                1
+                for entry in trace.selected
+                if entry.get("focus_start_line") is not None
+            ),
+        )
     return BudgetSpendReport(
         task_id=task_id,
         strategy=strategy,
         budget_max_tokens=budget_max_tokens,
         rows=tuple(rows),
         summary=summary,
+        focus_events=focused,
     )
 
 
@@ -463,6 +520,18 @@ class BudgetDiagnosticsReport:
         budgets = {report.budget_max_tokens for report in reports}
         budget = budgets.pop() if len(budgets) == 1 else None
         summary = _summarize_rows(rows, budget)
+        focused_generated = sum(
+            report.summary.focused_generated for report in reports
+        )
+        focused_selected = sum(
+            report.summary.focused_selected for report in reports
+        )
+        if focused_generated or focused_selected:
+            summary = replace(
+                summary,
+                focused_generated=focused_generated,
+                focused_selected=focused_selected,
+            )
         if budget is not None:
             utilizations = [
                 report.summary.budget_utilization
@@ -506,7 +575,9 @@ class BudgetDiagnosticsReport:
                     {"path": row.path, "count": 0, "max_tokens": 0, "tasks": []},
                 )
                 bucket["count"] += 1
-                bucket["max_tokens"] = max(bucket["max_tokens"], row.estimated_tokens)
+                bucket["max_tokens"] = max(
+                    bucket["max_tokens"], row.full_tokens or row.estimated_tokens
+                )
                 if row.task_id not in bucket["tasks"]:
                     bucket["tasks"].append(row.task_id)
         ordered = sorted(

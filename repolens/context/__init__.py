@@ -71,6 +71,11 @@ from repolens.context.firewall import (
     SafeContextPackage,
     Severity,
 )
+from repolens.context.focus_selection import (
+    DEFAULT_FALLBACK_LIMIT,
+    DEFAULT_MAX_FOCUSED,
+    FocusedSelection,
+)
 from repolens.context.intent import QueryIntent, classify_intent, extract_symbol_tokens
 from repolens.context.package import ContextPackage
 from repolens.context.render import render_context
@@ -94,12 +99,15 @@ __all__ = [
     "ContextEngine",
     "ContextFirewall",
     "ContextPackage",
+    "DEFAULT_FALLBACK_LIMIT",
+    "DEFAULT_MAX_FOCUSED",
     "DependencyExpansionConfig",
     "ExcludedCandidate",
     "Finding",
     "FirewallConfig",
     "FirewallDecision",
     "FirewallResult",
+    "FocusedSelection",
     "QueryIntent",
     "RetrievalConfig",
     "SafeContextCandidate",

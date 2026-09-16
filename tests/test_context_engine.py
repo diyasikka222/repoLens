@@ -393,7 +393,13 @@ def test_engine_budget_is_respected() -> None:
     )
     pkg = engine.build_context("application bootstrap")
     assert pkg.total_estimated_tokens <= 60
-    assert len(pkg.selected_files) < len(pkg.primary_candidates)
+    # main.py is oversized for a 60-token budget, so the full file is never
+    # selected: it may only appear as bounded focused slices.
+    main = [c for c in pkg.selected_files if c.path == Path("main.py")]
+    assert all(c.is_focused for c in main)
+    assert not any(
+        c.path == Path("main.py") and not c.is_focused for c in pkg.selected_files
+    )
 
 
 def test_engine_empty_repository() -> None:

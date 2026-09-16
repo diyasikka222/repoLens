@@ -136,6 +136,28 @@ def snapshot_excluded(candidate) -> dict:
     }
 
 
+def snapshot_focus_event(event: dict) -> dict:
+    """Snapshot one focused-context substitution event (P26.2 Step 4).
+
+    Events are already JSON-safe (produced by
+    :class:`~repolens.context.focus_selection.FocusedSelection`); this helper
+    keeps the tracer's single-source-of-serialization contract by dropping
+    unknown keys deterministically.
+    """
+    keys = (
+        "path",
+        "focus_name",
+        "focus_kind",
+        "focus_start_line",
+        "focus_end_line",
+        "focused_estimated_tokens",
+        "full_estimated_tokens",
+        "focus_reason",
+        "full_rejection_reason",
+    )
+    return {key: event.get(key) for key in keys}
+
+
 # ---------------------------------------------------------------------------
 # Tracer protocol + emit helpers
 # ---------------------------------------------------------------------------
@@ -168,6 +190,14 @@ class ContextPipelineTracer:
 
     def on_selection(self, selected: Sequence[dict], excluded: Sequence[dict]) -> None:
         """Surviving selection and budget-excluded candidates."""
+
+    def on_focus(self, events: Sequence[dict]) -> None:
+        """Focused-context substitution events (P26.2 Step 4).
+
+        One event per synthesized focused candidate: the source file, focused
+        symbol, start/end lines, focused and full-file token estimates, why
+        focus was attempted, and why the full representation was rejected.
+        """
 
 
 def observe_standard_stages(
@@ -222,6 +252,16 @@ def observe_rank_selection(
     )
 
 
+def observe_focus(
+    tracer: ContextPipelineTracer | None,
+    events: Sequence[dict],
+) -> None:
+    """Emit focused-context substitution events (no-op when no tracer)."""
+    if tracer is None:
+        return
+    tracer.on_focus([snapshot_focus_event(e) for e in events])
+
+
 # ---------------------------------------------------------------------------
 # Collector
 # ---------------------------------------------------------------------------
@@ -244,6 +284,7 @@ class PipelineTrace:
     ranked: tuple[dict, ...] = ()
     selected: tuple[dict, ...] = ()
     excluded: tuple[dict, ...] = ()
+    focus: tuple[dict, ...] = ()
     has_change_plan: bool = field(default=False)
 
     @property
@@ -326,6 +367,7 @@ class TraceCollector(ContextPipelineTracer):
         self._ranked: list[dict] = []
         self._selected: list[dict] = []
         self._excluded: list[dict] = []
+        self._focus: list[dict] = []
         self._has_change_plan = False
 
     def on_retrieval(self, entries: Sequence[dict]) -> None:
@@ -351,6 +393,9 @@ class TraceCollector(ContextPipelineTracer):
         self._selected.extend(dict(e) for e in selected)
         self._excluded.extend(dict(e) for e in excluded)
 
+    def on_focus(self, events: Sequence[dict]) -> None:
+        self._focus.extend(dict(e) for e in events)
+
     def trace(self) -> PipelineTrace:
         """Return the frozen, stage-ordered trace."""
         return PipelineTrace(
@@ -362,5 +407,6 @@ class TraceCollector(ContextPipelineTracer):
             ranked=tuple(self._ranked),
             selected=tuple(self._selected),
             excluded=tuple(self._excluded),
+            focus=tuple(self._focus),
             has_change_plan=self._has_change_plan,
         )

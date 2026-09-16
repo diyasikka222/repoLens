@@ -177,7 +177,9 @@ class SymbolCandidateDiagnosticsTests(unittest.TestCase):
             _write(
                 root,
                 "widget.py",
-                "class ZebraWidgetFactory:\n    pass\n# " + "x" * 400,
+                # One symbol, itself larger than the 60-token budget, so
+                # focused substitution (P26.2 Step 4) cannot recover it either.
+                "class ZebraWidgetFactory:\n    member = '" + "x" * 300 + "'\n",
             )
             collector = TraceCollector()
             engine = ContextEngine(

@@ -1,12 +1,14 @@
-"""Focused source representation for oversized files (P26.2 feasibility).
+"""Focused source representation for oversized files (P26.2).
 
 When a single file is larger than the remaining context budget, the only way
 to surface it without raising the budget is to expose a *focused portion* of
 its source instead of the whole file.  This module is the additive, internal
-representation for that idea.  It is deliberately not wired into the default
-``get_context`` pipeline — nothing here changes ranking, selection, the token
-budget, the firewall, or MCP output unless a producer opts in by turning a
-full-file :class:`~repolens.context.ContextCandidate` into focused items.
+*representation* for that idea.  It changes nothing in ranking, selection, the
+token budget, the firewall, or MCP output by itself — producers create focused
+items from full-file :class:`~repolens.context.ContextCandidate` objects when
+they need them.  The budget-selection wiring that consumes this representation
+lives in :class:`~repolens.context.focus_selection.FocusedSelection` (wired into
+budget selection as the P26.2 Step 4 opt-in).
 
 Core model:
 
@@ -258,9 +260,11 @@ def focus_package(
     ``paths`` limits which selected files get focused expansions (``None``
     means every selected file).  Every selected file keeps its full-file item
     first, then its focused symbol items in deterministic order, so the
-    derived package preserves deterministic ordering.  This function is never
-    called by the engine, MCP, CLI, or any default path — it is the explicit
-    opt-in the final budget-selection fix would use.
+    derived package preserves deterministic ordering.  This function is not
+    used by the engine's focused-context substitution (which keeps the
+    full-file candidate excluded and synthesizes only fitting focused items);
+    it is the general-purpose opt-in expander for callers that want the full
+    expansion.
     """
     wanted = frozenset(paths) if paths is not None else None
     expanded: list[ContextCandidate] = []
