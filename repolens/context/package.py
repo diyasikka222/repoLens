@@ -94,6 +94,17 @@ def _candidate_dict(candidate: ContextCandidate) -> dict:
     ):
         if value is not None:
             d[key] = value
+    # Focused-source metadata (P26.2), included only when present so the
+    # default serialization stays byte-for-byte unchanged.
+    for key, value in (
+        ("focus_name", candidate.focus_name),
+        ("focus_kind", candidate.focus_kind),
+        ("focus_parent_class", candidate.focus_parent_class),
+        ("focus_start_line", candidate.focus_start_line),
+        ("focus_end_line", candidate.focus_end_line),
+    ):
+        if value is not None:
+            d[key] = value
     return d
 
 

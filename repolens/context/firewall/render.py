@@ -67,6 +67,12 @@ def _render_safe_candidate(candidate: SafeContextCandidate) -> list[str]:
     if candidate.inclusion_reason:
         lines.append(f"Inclusion: {candidate.inclusion_reason}")
     lines.append(f"Estimated tokens: {candidate.estimated_tokens}")
+    if candidate.focus_start_line is not None and candidate.focus_name:
+        focus_kind = candidate.focus_kind or "symbol"
+        lines.append(
+            f"Focus: {candidate.focus_name} ({focus_kind}) lines "
+            f"{candidate.focus_start_line}-{candidate.focus_end_line}"
+        )
     if candidate.retrieval_rank is not None:
         lines.append(f"Retrieval rank: {candidate.retrieval_rank}")
     if candidate.graph_distance is not None:

@@ -97,6 +97,28 @@ class ContextCandidate:
     change_relationship: str | None = None
     change_priority: int | None = None
 
+    # Focused-source metadata (P26.2 feasibility). All additive and
+    # backward-compatible: defaulting to None leaves every existing
+    # construction site and serialization path unchanged. When set, the
+    # candidate's ``source``/``estimated_tokens`` describe only the focused
+    # line range below, and these fields record the symbol it came from.
+    # A candidate with all focus fields None (the default) represents the
+    # full file, preserving the historical meaning of ``source``.
+    focus_name: str | None = None
+    focus_kind: str | None = None
+    focus_parent_class: str | None = None
+    focus_start_line: int | None = None
+    focus_end_line: int | None = None
+
+    @property
+    def is_focused(self) -> bool:
+        """``True`` when this candidate represents a focused source slice."""
+        return (
+            self.focus_name is not None
+            and self.focus_start_line is not None
+            and self.focus_end_line is not None
+        )
+
 
 @dataclass(frozen=True)
 class ExcludedCandidate:

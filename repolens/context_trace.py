@@ -119,6 +119,11 @@ def snapshot_candidate(candidate) -> dict:
         "change_confidence": candidate.change_confidence,
         "change_relationship": candidate.change_relationship,
         "change_priority": candidate.change_priority,
+        "focus_name": candidate.focus_name,
+        "focus_kind": candidate.focus_kind,
+        "focus_parent_class": candidate.focus_parent_class,
+        "focus_start_line": candidate.focus_start_line,
+        "focus_end_line": candidate.focus_end_line,
     }
 
 

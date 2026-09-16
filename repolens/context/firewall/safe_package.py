@@ -36,6 +36,13 @@ class SafeContextCandidate:
     graph_distance: int | None = None
     inclusion_reason: str | None = None
 
+    # Focused-source metadata (P26.2), additive and backward-compatible.
+    focus_name: str | None = None
+    focus_kind: str | None = None
+    focus_parent_class: str | None = None
+    focus_start_line: int | None = None
+    focus_end_line: int | None = None
+
 
 @dataclass(frozen=True)
 class SafeContextPackage:
@@ -100,7 +107,7 @@ class SafeContextPackage:
 
 
 def _safe_candidate_dict(candidate: SafeContextCandidate) -> dict:
-    return {
+    d = {
         "path": candidate.path,
         "role": candidate.role,
         "estimated_tokens": candidate.estimated_tokens,
@@ -113,3 +120,13 @@ def _safe_candidate_dict(candidate: SafeContextCandidate) -> dict:
         "semantic_rank": candidate.semantic_rank,
         "graph_distance": candidate.graph_distance,
     }
+    for key, value in (
+        ("focus_name", candidate.focus_name),
+        ("focus_kind", candidate.focus_kind),
+        ("focus_parent_class", candidate.focus_parent_class),
+        ("focus_start_line", candidate.focus_start_line),
+        ("focus_end_line", candidate.focus_end_line),
+    ):
+        if value is not None:
+            d[key] = value
+    return d

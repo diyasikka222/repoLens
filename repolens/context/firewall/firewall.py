@@ -179,6 +179,11 @@ class ContextFirewall:
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
                         inclusion_reason=candidate.inclusion_reason,
+                        focus_name=candidate.focus_name,
+                        focus_kind=candidate.focus_kind,
+                        focus_parent_class=candidate.focus_parent_class,
+                        focus_start_line=candidate.focus_start_line,
+                        focus_end_line=candidate.focus_end_line,
                     )
                 )
             elif decision == "redact":
@@ -207,6 +212,11 @@ class ContextFirewall:
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
                         inclusion_reason=candidate.inclusion_reason,
+                        focus_name=candidate.focus_name,
+                        focus_kind=candidate.focus_kind,
+                        focus_parent_class=candidate.focus_parent_class,
+                        focus_start_line=candidate.focus_start_line,
+                        focus_end_line=candidate.focus_end_line,
                     )
                 )
             else:
@@ -224,6 +234,11 @@ class ContextFirewall:
                         semantic_rank=candidate.semantic_rank,
                         graph_distance=candidate.graph_distance,
                         inclusion_reason=candidate.inclusion_reason,
+                        focus_name=candidate.focus_name,
+                        focus_kind=candidate.focus_kind,
+                        focus_parent_class=candidate.focus_parent_class,
+                        focus_start_line=candidate.focus_start_line,
+                        focus_end_line=candidate.focus_end_line,
                     )
                 )
 
@@ -308,6 +323,11 @@ class ContextFirewall:
                 semantic_rank=c.semantic_rank,
                 graph_distance=c.graph_distance,
                 inclusion_reason=c.inclusion_reason,
+                focus_name=c.focus_name,
+                focus_kind=c.focus_kind,
+                focus_parent_class=c.focus_parent_class,
+                focus_start_line=c.focus_start_line,
+                focus_end_line=c.focus_end_line,
             )
             for c in package.selected_files
         )

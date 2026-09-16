@@ -53,6 +53,14 @@ from repolens.context.config import (
     RetrievalConfig,
 )
 from repolens.context.engine import ContextEngine
+from repolens.context.focus import (
+    SourceSpan,
+    SymbolSpan,
+    extract_symbol_spans,
+    focus_candidate,
+    focused_items_for_file,
+    focus_package,
+)
 from repolens.context.firewall import (
     ContextFirewall,
     Finding,
@@ -97,8 +105,14 @@ __all__ = [
     "SafeContextCandidate",
     "SafeContextPackage",
     "Severity",
+    "SourceSpan",
+    "SymbolSpan",
     "classify_intent",
     "estimate_tokens",
+    "extract_symbol_spans",
     "extract_symbol_tokens",
+    "focus_candidate",
+    "focus_package",
+    "focused_items_for_file",
     "render_context",
 ]
